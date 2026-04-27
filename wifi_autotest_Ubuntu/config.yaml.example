@@ -1,0 +1,63 @@
+# ==============================================================================
+#  config.yaml.example
+#  ---------------------------------------------------------------------------
+#  Copy this file to config.yaml and fill in your environment values.
+#  DO NOT commit config.yaml to git (see .gitignore).
+# ==============================================================================
+
+# ----- Device Under Test (the WiFi router being tested) -----
+dut:
+  host: 192.168.99.1
+  ssh_user: admin
+  # Choose ONE authentication method:
+  ssh_password: "CHANGEME"                  # plain password (simple but less secure)
+  # ssh_key_path: ~/.ssh/id_rsa             # or use SSH key (recommended)
+
+  # Serial console (on Test PC)
+  serial_port: /dev/ttyUSB0
+  serial_baud: 115200
+
+  # Wireless settings the test suite will configure
+  wifi:
+    ssid_2g: "TestBed-2G"
+    ssid_5g: "TestBed-5G"
+    ssid_6g: "TestBed-6G"
+    psk:     "testbed12345"
+    channel_2g: 6
+    channel_5g: 36
+    channel_6g: 37
+
+# ----- Banana Pi BPI-R4 (WiFi STA client / traffic generator) -----
+bpi_sta:
+  host: 192.168.99.100
+  ssh_user: root
+  ssh_key_path: ~/.ssh/id_rsa
+  # ssh_password: "bananapi"                # alternative
+
+  # Wireless interface on BPI (usually wlan0 or phy0-sta0)
+  wifi_iface: wlan0
+
+# ----- Test Controller (this Test PC) -----
+controller:
+  log_dir: ./runs              # where per-run logs are stored
+  report_dir: ./reports        # where HTML/PDF reports go
+  keep_last_n_runs: 20         # auto-cleanup older runs
+
+# ----- Claude AI Analysis -----
+claude:
+  # API key is read from ANTHROPIC_API_KEY env var (not here, for security)
+  model: "claude-opus-4-7"     # or claude-sonnet-4-6 for cheaper runs
+  max_tokens: 4000
+  prompt_template: prompts/wifi_triage.md
+
+  # Privacy: strip these patterns from logs before sending to Claude
+  redact_patterns:
+    - mac_address              # AA:BB:CC:DD:EE:FF -> [MAC]
+    - ipv4_private             # keep but could mask if needed
+    - serial_number            # S/N:XXXX -> [SN]
+
+# ----- Optional: PDU for remote power cycling -----
+# pdu:
+#   host: 192.168.99.50
+#   api_token: "CHANGEME"
+#   dut_outlet: 1
