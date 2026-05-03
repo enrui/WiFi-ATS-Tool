@@ -17,6 +17,11 @@ GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+# Load .env if present (ANTHROPIC_API_KEY etc.)
+if [[ -f "$PROJECT_ROOT/.env" ]]; then
+  set -a; source "$PROJECT_ROOT/.env"; set +a
+fi
+
 # Activate venv if present
 if [[ -f "$PROJECT_ROOT/.venv/bin/activate" ]]; then
   # shellcheck disable=SC1091
@@ -69,31 +74,15 @@ else
   echo -e "${GREEN}[+]${NC} All tests passed — skipping diagnostics."
 fi
 
-# ---------- 4. Claude Code AI analysis (on failure) ----------
+# ---------- 4. Claude API analysis (on failure) ----------
 if [[ $PYTEST_RC -ne 0 && "$SKIP_AI" == "false" ]]; then
-  if ! command -v claude &>/dev/null; then
-    echo -e "${YELLOW}[!]${NC} 'claude' CLI not found — skipping AI analysis."
+  if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    echo -e "${YELLOW}[!]${NC} ANTHROPIC_API_KEY not set — skipping AI analysis."
+    echo -e "${YELLOW}[!]${NC} Set it with: export ANTHROPIC_API_KEY='sk-ant-...'"
   else
-    echo -e "${GREEN}[+]${NC} Running Claude Code analysis..."
-    ANALYSIS_PROMPT="You are analyzing a WiFi automated test failure. The run directory is: ${RUN_ABS}
-
-Read and analyze these files:
-- ${RUN_ABS}/junit.xml  (test results — which tests failed)
-- ${RUN_ABS}/live_diagnostics.json  (SSH diagnostics from DUT and BPI collected right after failure)
-- ${RUN_ABS}/pytest_stdout.log  (full pytest output)
-
-Then write a Markdown failure analysis report to: ${RUN_ABS}/claude_report.md
-
-The report must cover:
-1. Which tests failed and the exact assertion error
-2. Root cause — based on the diagnostic data (iw dev, dmesg, wpa_supplicant state, iperf logs)
-3. Key evidence — quote specific lines from the diagnostics
-4. Suggested fix — concrete actionable steps
-
-Important: do NOT modify any DUT settings. If a DUT config change is needed, state it clearly and ask EJ to make it."
-
-    claude --print "$ANALYSIS_PROMPT" > /dev/null || \
-      echo -e "${YELLOW}[!]${NC} Claude Code analysis failed (non-fatal)"
+    echo -e "${GREEN}[+]${NC} Running Claude API analysis..."
+    python tools/claude_api_analyze.py "$RUN_ABS" || \
+      echo -e "${YELLOW}[!]${NC} Claude API analysis failed (non-fatal)"
     [[ -f "${RUN_ABS}/claude_report.md" ]] && \
       echo -e "${GREEN}[+]${NC} AI analysis written to ${RUN_DIR}/claude_report.md"
   fi
