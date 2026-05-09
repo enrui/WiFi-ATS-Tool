@@ -163,7 +163,8 @@ install_python_env() {
   pip install --quiet \
     pytest pytest-html pytest-timeout \
     paramiko pexpect pyserial pyyaml \
-    anthropic rich tabulate
+    anthropic rich tabulate \
+    fastapi "uvicorn[standard]"
 }
 
 install_claude_cli() {

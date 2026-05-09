@@ -1,6 +1,6 @@
 # WiFi Router Automated Test Framework
 
-自動化 WiFi router 測試框架，支援 Serial + SSH 雙通道控制、Banana Pi BPI-R4 作為 WiFi 7 STA client，以及 Claude AI 做 log 分析。
+自動化 WiFi router 測試框架，支援 Serial + SSH 雙通道控制、Banana Pi BPI-R4 作為 WiFi 7 STA client，以及 **Anthropic API（claude-sonnet-4-6）** 做 log 分析與根因報告。
 
 > 作者：EJ Chang (張恩瑞)
 > 產出版本：Phase 1 Bootstrap Kit
@@ -15,15 +15,15 @@
 ## 專案結構
 
 ```
-wifi_autotest/
+wifi_autotest_Mac/
 ├── README.md                    ← 你在讀的這個
 ├── pytest.ini                   ← pytest 設定（必須在根目錄）
 ├── conftest.py                  ← pytest 共用 fixture（必須在根目錄）
-├── .gitignore
 │
-├── bootstrap_testpc.sh          ← Test PC 一鍵安裝
+├── bootstrap_testpc.sh          ← Test PC 一鍵安裝（含 fastapi/uvicorn）
 ├── bootstrap_bpi.sh             ← BPI-R4 一鍵配置
-├── run_all.sh                   ← End-to-end pipeline（最常用）
+├── run_all.sh                   ← End-to-end pipeline（含 AI 分析）
+├── run_bg.sh                    ← 背景執行（RF / Stability，shell 立即返回）
 ├── run_stability.sh             ← 穩定度 soak test 啟動器
 │
 ├── docs/
@@ -39,7 +39,8 @@ wifi_autotest/
 │
 ├── tools/                       ← Python 工具腳本（由 run_*.sh 或手動呼叫）
 │   ├── collect_logs.py          ← 從設備抓 log
-│   ├── analyze_logs.py          ← 呼叫 Claude 分析 log
+│   ├── analyze_logs.py          ← SSH 進設備收集即時診斷資料
+│   ├── claude_api_analyze.py    ← Anthropic API 根因分析（claude-sonnet-4-6）
 │   ├── generate_report.py       ← 從 run dir 產生單頁 HTML 摘要報告
 │   └── stability_runner.py      ← 穩定度 soak test 主邏輯
 │
@@ -50,27 +51,28 @@ wifi_autotest/
 │   ├── test_legacy_compat.py    ← 舊設備模式相容性（b/g/n/ac）
 │   └── test_z_channel_sweep.py  ← 全頻道掃描效能一致性（最後執行，避免 MT7996 driver 狀態污染）
 │
-├── prompts/
-│   └── wifi_triage.md           ← Claude 分析用 prompt
+├── dashboard/                   ← 本機 Web Dashboard（FastAPI + 純 HTML）
+│   ├── server.py                ← API server（讀 runs/、觸發測試、SSE log stream）
+│   ├── static/index.html        ← 單頁 dashboard UI
+│   └── requirements.txt
 │
 ├── scripts/
 │   ├── bpi_connect.sh           ← BPI 上的 WiFi 連線輔助
 │   └── bpi_iperf_server.sh      ← BPI 上的 iperf3 server
 │
-└── runs/                        ← 每次測試結果（自動產生）
-    ├── YYYYMMDD-HHMMSS/         ← run_all.sh 產生
+└── runs/                        ← 每次測試結果（自動產生，gitignored）
+    ├── bg_YYYYMMDD-HHMMSS.log   ← run_bg.sh 的背景執行 log
+    ├── YYYYMMDD-HHMMSS/         ← RF 測試結果
+    │   ├── junit.xml
     │   ├── pytest_report.html
     │   ├── pytest_stdout.log
-    │   ├── dut_serial.log
-    │   ├── dut_dmesg.log
-    │   ├── bpi_*.log
-    │   ├── iperf_*.json
-    │   ├── claude_report.json   ← AI 分析結果
-    │   └── claude_report.md
-    └── stability-YYYYMMDD-HHMMSS/  ← run_stability.sh 產生
-        ├── stability.log            ← 每次檢查的詳細 log
-        ├── stability_data.json      ← 結構化時序資料（可進 DB）
-        └── stability_report.md      ← 人類可讀的最終報告
+    │   ├── live_diagnostics.json ← SSH 診斷資料
+    │   ├── claude_report.md      ← Anthropic API 根因分析
+    │   └── summary_report.html
+    └── stability-YYYYMMDD-HHMMSS/  ← Stability 測試結果
+        ├── stability.log
+        ├── stability_data.json
+        └── stability_report.md
 ```
 
 ## Quickstart（給工程師）
@@ -89,7 +91,9 @@ wifi_autotest/
 ```bash
 cp config/config.yaml.example config.yaml
 nano config.yaml     # 填入 IP、帳號密碼、SSID、PSK...
-export ANTHROPIC_API_KEY="sk-ant-..."   # 給 Claude 分析用
+
+# API key 寫入 .env（已加入 .gitignore，不會進 git）
+echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
 ```
 
 ### 3. Bootstrap
@@ -112,14 +116,29 @@ bash run_all.sh
 # 包含 RF 測試（association + throughput）
 bash run_all.sh rf
 
-# 跑 RF 但不呼叫 Claude（省 API 成本）
+# 跑 RF 但不呼叫 AI 分析（省 API 成本）
 bash run_all.sh rf --skip-ai
+
+# 背景執行（shell 立即返回，測試在背景持續跑）
+bash run_bg.sh rf
+bash run_bg.sh stability
+bash run_bg.sh rf stability   # 依序執行兩者
 ```
 
 結果會進 `runs/<timestamp>/`，包含：
-- `pytest_report.html` —— 開瀏覽器看測試結果
-- `claude_report.md` —— AI 的根因分析
+- `pytest_report.html` —— 詳細測試結果
+- `claude_report.md` —— Anthropic API 根因分析
+- `summary_report.html` —— 單頁整合摘要
 - 所有原始 log（備查）
+
+### 5. 開啟 Dashboard
+
+```bash
+uvicorn dashboard.server:app --port 8080
+# 開瀏覽器 http://localhost:8080
+```
+
+Dashboard 提供：測試歷史清單、pass/fail 趨勢圖、AI 分析報告瀏覽、一鍵觸發測試、即時 log 串流。
 
 ---
 
@@ -313,22 +332,31 @@ def test_my_new_case(dut_ssh, bpi_ssh, cfg):
 
 ---
 
-## 調整 Claude 行為
+## 調整 AI 分析行為
 
-改 `prompts/wifi_triage.md`。例如：
-- 新增你們公司特有的錯誤碼字典
-- 調整 severity 標準
-- 加入產品線特定的已知 bug 清單
+改 `tools/claude_api_analyze.py` 裡的 `SYSTEM_PROMPT` 或 `build_prompt()`。例如：
+- 新增產品特有的錯誤碼字典
+- 調整輸出格式或重點區塊
+- 限制分析範圍（只看 dmesg、只看 iperf）
 
-改 prompt 後不必改任何 Python 程式碼，下次 `run_all.sh` 就生效。
+改完後不必重啟任何服務，下次 `run_all.sh` 失敗時就會用新版 prompt。
 
 ---
 
-## 環境變數
+## 環境變數與 .env
+
+建議把敏感設定寫進 `.env`（已加入 `.gitignore`）：
+
+```bash
+# .env
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+`run_all.sh` 和 `run_bg.sh` 啟動時會自動載入 `.env`。
 
 | 變數 | 說明 | 必要性 |
 |------|------|--------|
-| `ANTHROPIC_API_KEY` | Claude API 金鑰 | AI 分析時必要 |
+| `ANTHROPIC_API_KEY` | Anthropic API 金鑰 | AI 分析時必要 |
 | `WIFI_AUTOTEST_CONFIG` | config.yaml 路徑覆寫 | 可選 |
 
 ---
@@ -355,6 +383,9 @@ def test_my_new_case(dut_ssh, bpi_ssh, cfg):
 | BPI 關聯不上 | 先手動 `ssh` 進去確認 `iw dev`、`brctl show`，或執行 `bpi_connect.sh <ssid> <psk>` debug |
 | 6G 測試全部 ASSOCIATING 卡住 | BPI MT7996 driver 狀態損壞，重啟 BPI 即可。詳見 [`Note.md`](docs/Note.md) #5 |
 | 5G 掃描失敗 `Resource busy` | BPI 進入 DFS 靜默模式，`wifi down && wifi up` 或重啟。詳見 [`Note.md`](docs/Note.md) #4 |
+| AI 分析沒跑 | 確認 `.env` 存在且 `ANTHROPIC_API_KEY` 有效；或改用 `--skip-ai` 先跳過 |
+| Dashboard 無法啟動 | `source .venv/bin/activate && pip install fastapi uvicorn` |
+| Dashboard 顯示 No runs | 確認 `runs/` 目錄在 `wifi_autotest_Mac/` 底下，且有包含 `junit.xml` 的子目錄 |
 
 遇到更奇怪的硬體或驅動問題，參考 **[`Note.md`](docs/Note.md)** — 記錄了這個 testbed 實際踩過的雷。
 

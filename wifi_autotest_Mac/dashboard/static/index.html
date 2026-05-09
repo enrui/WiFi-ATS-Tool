@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>WiFi-ATS Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: { extend: {
+      colors: {
+        bg:      '#0d1117',
+        surface: '#161b22',
+        border:  '#30363d',
+        muted:   '#21262d',
+        pass:    '#3fb950',
+        fail:    '#f85149',
+        accent:  '#58a6ff',
+        warn:    '#e3b341',
+      }
+    }}
+  }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+<style>
+  body { background:#0d1117; color:#c9d1d9; font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+  ::-webkit-scrollbar { width:5px; height:5px; }
+  ::-webkit-scrollbar-track { background:#161b22; }
+  ::-webkit-scrollbar-thumb { background:#30363d; border-radius:3px; }
+
+  /* Markdown styles */
+  .md h1,.md h2,.md h3 { color:#e6edf3; font-weight:600; margin:1em 0 .4em; }
+  .md h1 { font-size:1.2em; } .md h2 { font-size:1.05em; } .md h3 { font-size:.95em; }
+  .md p  { margin:.5em 0; line-height:1.6; }
+  .md ul,.md ol { margin:.4em 0 .4em 1.2em; }
+  .md li { margin:.2em 0; }
+  .md code { background:#21262d; padding:2px 6px; border-radius:4px; font-size:.82em; font-family:monospace; color:#79c0ff; }
+  .md pre  { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:.8em 1em; overflow-x:auto; margin:.6em 0; }
+  .md pre code { background:none; padding:0; color:#e6edf3; }
+  .md blockquote { border-left:3px solid #30363d; margin:.5em 0; padding:.2em .8em; color:#8b949e; }
+  .md strong { color:#e6edf3; }
+
+  .pulse { animation: pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+
+  .row-hover { transition:background .12s; }
+  .row-hover:hover { background:#1c2128; }
+</style>
+</head>
+
+<body x-data="app()" x-init="init()" class="flex h-screen overflow-hidden">
+
+<!-- ═══════════════════════ SIDEBAR ═══════════════════════ -->
+<aside class="w-52 flex-shrink-0 flex flex-col border-r" style="background:#161b22;border-color:#30363d;">
+  <div class="px-4 py-4 border-b" style="border-color:#30363d;">
+    <div class="text-sm font-bold" style="color:#e6edf3;">WiFi-ATS</div>
+    <div class="text-xs mt-0.5" style="color:#8b949e;">Test Dashboard</div>
+  </div>
+
+  <nav class="flex-1 p-2 space-y-0.5 overflow-y-auto">
+    <button @click="setPage('rf')"
+      :class="page==='rf' ? 'bg-blue-600/20 text-blue-400' : 'text-slate-400 hover:bg-white/5'"
+      class="w-full text-left px-3 py-2 rounded-md text-sm flex items-center gap-2 transition-colors">
+      <span>📡</span> RF Tests
+    </button>
+    <button @click="setPage('stability')"
+      :class="page==='stability' ? 'bg-violet-600/20 text-violet-400' : 'text-slate-400 hover:bg-white/5'"
+      class="w-full text-left px-3 py-2 rounded-md text-sm flex items-center gap-2 transition-colors">
+      <span>⏱</span> Stability
+    </button>
+  </nav>
+
+  <div class="px-4 py-3 border-t text-xs" style="border-color:#30363d;color:#484f58;">
+    Phase 1 · v1.0
+  </div>
+</aside>
+
+<!-- ═══════════════════════ MAIN ═══════════════════════ -->
+<div class="flex-1 flex flex-col min-w-0 overflow-hidden">
+
+  <!-- ── Header ── -->
+  <header class="flex items-center justify-between px-5 py-2.5 border-b flex-shrink-0"
+    style="background:#161b22;border-color:#30363d;">
+
+    <div class="flex items-center gap-3">
+      <!-- Status dot -->
+      <span class="w-2 h-2 rounded-full flex-shrink-0"
+        :class="status.running ? 'bg-orange-400 pulse' : 'bg-slate-600'"></span>
+      <span class="text-sm" style="color:#8b949e;"
+        x-text="status.running ? `Running · PID ${status.pid}` : 'Idle'"></span>
+      <span x-show="!status.running && lastRunTime" class="text-xs" style="color:#484f58;"
+        x-text="'Last: ' + lastRunTime"></span>
+    </div>
+
+    <div class="flex items-center gap-2">
+      <button @click="trigger('rf')" :disabled="status.running"
+        class="px-3 py-1.5 text-xs rounded-md text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        style="background:#1f6feb;" onmouseover="this.style.background='#388bfd'" onmouseout="this.style.background='#1f6feb'">
+        ▶ Run RF
+      </button>
+      <button @click="trigger('stability')" :disabled="status.running"
+        class="px-3 py-1.5 text-xs rounded-md text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        style="background:#6e40c9;" onmouseover="this.style.background='#8957e5'" onmouseout="this.style.background='#6e40c9'">
+        ▶ Stability
+      </button>
+      <button @click="trigger('rf stability')" :disabled="status.running"
+        class="px-3 py-1.5 text-xs rounded-md border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        style="border-color:#30363d;color:#8b949e;"
+        onmouseover="this.style.background='#21262d'" onmouseout="this.style.background='transparent'">
+        ▶ RF + Soak
+      </button>
+      <button x-show="status.running" @click="stopTest()"
+        class="px-3 py-1.5 text-xs rounded-md border transition-colors"
+        style="border-color:#6e2f2f;background:#2d1b1b;color:#f85149;"
+        onmouseover="this.style.background='#3d1f1f'" onmouseout="this.style.background='#2d1b1b'">
+        ■ Stop
+      </button>
+      <button @click="refresh()"
+        class="px-3 py-1.5 text-xs rounded-md border transition-colors"
+        style="border-color:#30363d;color:#8b949e;"
+        onmouseover="this.style.background='#21262d'" onmouseout="this.style.background='transparent'">
+        ↻
+      </button>
+    </div>
+  </header>
+
+  <!-- ── Content Area ── -->
+  <div class="flex-1 overflow-y-auto p-5 space-y-4" style="background:#0d1117;">
+
+    <!-- ── Stats Cards ── -->
+    <div class="grid grid-cols-4 gap-3">
+      <div class="rounded-lg p-4" style="background:#161b22;border:1px solid #30363d;">
+        <div class="text-xs mb-1" style="color:#8b949e;">Total Runs</div>
+        <div class="text-2xl font-bold" style="color:#e6edf3;" x-text="pageRuns.length"></div>
+      </div>
+      <div class="rounded-lg p-4" style="background:#161b22;border:1px solid #30363d;">
+        <div class="text-xs mb-1" style="color:#8b949e;" x-text="page==='stability' ? 'Avg DL' : 'Pass Rate'"></div>
+        <div class="text-2xl font-bold"
+          :style="page!=='stability' ? (passRate>=90?'color:#3fb950':passRate>=70?'color:#e3b341':'color:#f85149') : 'color:#58a6ff'"
+          x-text="page==='stability' ? (stabilityAvgDL + ' Mbps') : (passRate + '%')"></div>
+      </div>
+      <div class="rounded-lg p-4" style="background:#161b22;border:1px solid #30363d;">
+        <div class="text-xs mb-1" style="color:#8b949e;">Last Run</div>
+        <div class="text-sm font-medium" style="color:#e6edf3;"
+          x-text="pageRuns[0] ? fmtDate(pageRuns[0].timestamp) : '—'"></div>
+        <template x-if="pageRuns[0] && page!=='stability'">
+          <div class="text-xs mt-1"
+            :style="pageRuns[0].failed>0 ? 'color:#f85149' : 'color:#3fb950'"
+            x-text="pageRuns[0].failed>0 ? pageRuns[0].failed+' failed' : 'All passed'"></div>
+        </template>
+        <template x-if="pageRuns[0] && page==='stability'">
+          <div class="text-xs mt-1"
+            :style="pageRuns[0].stability?.result==='PASS' ? 'color:#3fb950' : 'color:#f85149'"
+            x-text="pageRuns[0].stability?.result || '—'"></div>
+        </template>
+      </div>
+      <div class="rounded-lg p-4" style="background:#161b22;border:1px solid #30363d;">
+        <div class="text-xs mb-1" style="color:#8b949e;" x-text="page==='stability' ? 'Total Drops' : 'Test Cases'"></div>
+        <div class="text-2xl font-bold" style="color:#e6edf3;"
+          x-text="page==='stability' ? totalDrops : (pageRuns[0]?.total || 39)"></div>
+        <div class="text-xs mt-1" style="color:#484f58;"
+          x-text="page==='stability' ? 'across all runs' : 'per run'"></div>
+      </div>
+    </div>
+
+    <!-- ── Run List + Detail ── -->
+    <div class="grid gap-3" style="grid-template-columns:220px 1fr;">
+
+      <!-- Run list -->
+      <div class="rounded-lg overflow-hidden flex flex-col" style="background:#161b22;border:1px solid #30363d;max-height:380px;">
+        <div class="px-4 py-2.5 border-b text-xs font-semibold flex-shrink-0"
+          style="border-color:#30363d;color:#8b949e;letter-spacing:.05em;">
+          RUN HISTORY
+        </div>
+        <div class="overflow-y-auto flex-1 divide-y" style="border-color:#21262d;">
+          <template x-for="run in pageRuns" :key="run.id">
+            <div @click="selectRun(run)"
+              class="px-3 py-2.5 cursor-pointer row-hover transition-colors"
+              :style="selectedId===run.id ? 'background:#1c2128;border-left:2px solid #58a6ff;padding-left:10px;' : ''">
+              <div class="text-xs font-mono mb-1" style="color:#8b949e;" x-text="fmtDate(run.timestamp)"></div>
+
+              <!-- RF run -->
+              <template x-if="run.type!=='stability'">
+                <div class="flex items-center gap-2 text-xs">
+                  <span style="color:#3fb950;" x-text="'✓ '+run.passed"></span>
+                  <template x-if="run.failed>0">
+                    <span style="color:#f85149;" x-text="'✗ '+run.failed"></span>
+                  </template>
+                  <span style="color:#484f58;" x-text="'/ '+run.total"></span>
+                  <template x-if="run.has_ai_report">
+                    <span class="text-xs" style="color:#58a6ff;" title="AI report available">🤖</span>
+                  </template>
+                </div>
+              </template>
+
+              <!-- Stability run -->
+              <template x-if="run.type==='stability'">
+                <div class="text-xs space-y-0.5">
+                  <div x-text="run.stability ? run.stability.band+' · '+run.stability.checks+' checks' : 'Soak test'"
+                    style="color:#8b949e;"></div>
+                  <div :style="run.stability?.result==='PASS' ? 'color:#3fb950' : 'color:#f85149'"
+                    x-text="run.stability?.result || ''"></div>
+                </div>
+              </template>
+            </div>
+          </template>
+          <div x-show="pageRuns.length===0"
+            class="px-4 py-10 text-center text-sm" style="color:#484f58;">
+            No runs yet
+          </div>
+        </div>
+      </div>
+
+      <!-- Detail panel -->
+      <div class="rounded-lg overflow-hidden flex flex-col" style="background:#161b22;border:1px solid #30363d;max-height:380px;">
+
+        <!-- Empty state -->
+        <div x-show="!selectedId" class="flex-1 flex items-center justify-center" style="color:#484f58;">
+          <div class="text-center">
+            <div class="text-4xl mb-2">📊</div>
+            <div class="text-sm">Click a run to view details</div>
+          </div>
+        </div>
+
+        <!-- Loaded detail -->
+        <template x-if="selectedId && detail">
+          <div class="flex flex-col h-full">
+            <!-- Tab bar -->
+            <div class="flex items-center justify-between px-4 py-2 border-b flex-shrink-0"
+              style="border-color:#30363d;">
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-mono" style="color:#8b949e;" x-text="detail.id"></span>
+                <template x-if="detail.type!=='stability'">
+                  <span class="text-xs px-1.5 py-0.5 rounded font-medium"
+                    :style="detail.failed>0 ? 'background:#3d1b1b;color:#f85149;' : 'background:#122d22;color:#3fb950;'"
+                    x-text="detail.failed>0 ? '● FAIL' : '● PASS'"></span>
+                </template>
+                <template x-if="detail.type==='stability' && detail.stability">
+                  <span class="text-xs px-1.5 py-0.5 rounded font-medium"
+                    :style="detail.stability.result==='PASS' ? 'background:#122d22;color:#3fb950;' : 'background:#3d1b1b;color:#f85149;'"
+                    x-text="'● '+detail.stability.result"></span>
+                </template>
+              </div>
+              <div class="flex gap-1">
+                <button @click="detailTab='cases'"
+                  :style="detailTab==='cases' ? 'background:#21262d;color:#e6edf3;' : 'color:#8b949e;'"
+                  class="text-xs px-2.5 py-1 rounded transition-colors"
+                  x-text="detail.type==='stability' ? 'Summary' : 'Test Cases'"></button>
+                <button x-show="detail.has_ai_report" @click="detailTab='ai'"
+                  :style="detailTab==='ai' ? 'background:#21262d;color:#e6edf3;' : 'color:#8b949e;'"
+                  class="text-xs px-2.5 py-1 rounded transition-colors">
+                  🤖 AI Report
+                </button>
+              </div>
+            </div>
+
+            <!-- Cases / Summary tab -->
+            <div x-show="detailTab==='cases'" class="overflow-y-auto flex-1">
+
+              <!-- RF: test case table -->
+              <template x-if="detail.type!=='stability'">
+                <table class="w-full text-xs">
+                  <thead class="sticky top-0" style="background:#161b22;">
+                    <tr style="border-bottom:1px solid #21262d;">
+                      <th class="text-left px-4 py-2 font-medium" style="color:#8b949e;">Test</th>
+                      <th class="text-left px-4 py-2 font-medium w-16" style="color:#8b949e;">Time</th>
+                      <th class="text-left px-4 py-2 font-medium w-20" style="color:#8b949e;">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="tc in detail.cases" :key="tc.name">
+                      <tr class="row-hover border-b" style="border-color:#21262d;">
+                        <td class="px-4 py-2 font-mono break-all" x-text="tc.name"></td>
+                        <td class="px-4 py-2 tabular-nums" style="color:#8b949e;" x-text="tc.time?.toFixed(1)+'s'"></td>
+                        <td class="px-4 py-2">
+                          <span :style="tc.status==='passed' ? 'color:#3fb950' : 'color:#f85149'"
+                            x-text="tc.status==='passed' ? '✓' : '✗ '+tc.status"></span>
+                          <div x-show="tc.message" class="text-xs mt-0.5 break-all" style="color:#8b6f6f;" x-text="tc.message"></div>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </template>
+
+              <!-- Stability: summary cards -->
+              <template x-if="detail.type==='stability' && detail.stability">
+                <div class="p-4 space-y-3">
+                  <div class="grid grid-cols-2 gap-3">
+                    <div class="rounded p-3" style="background:#0d1117;border:1px solid #21262d;">
+                      <div class="text-xs mb-1" style="color:#8b949e;">Band</div>
+                      <div class="text-lg font-bold" style="color:#e6edf3;" x-text="detail.stability.band"></div>
+                    </div>
+                    <div class="rounded p-3" style="background:#0d1117;border:1px solid #21262d;">
+                      <div class="text-xs mb-1" style="color:#8b949e;">Checks</div>
+                      <div class="text-lg font-bold" style="color:#e6edf3;" x-text="detail.stability.checks"></div>
+                    </div>
+                    <div class="rounded p-3" style="background:#0d1117;border:1px solid #21262d;">
+                      <div class="text-xs mb-1" style="color:#8b949e;">TCP DL avg</div>
+                      <div class="text-lg font-bold" style="color:#58a6ff;" x-text="detail.stability.dl_avg_mbps + ' Mbps'"></div>
+                    </div>
+                    <div class="rounded p-3" style="background:#0d1117;border:1px solid #21262d;">
+                      <div class="text-xs mb-1" style="color:#8b949e;">TCP UL avg</div>
+                      <div class="text-lg font-bold" style="color:#58a6ff;" x-text="detail.stability.ul_avg_mbps + ' Mbps'"></div>
+                    </div>
+                    <div class="rounded p-3" style="background:#0d1117;border:1px solid #21262d;">
+                      <div class="text-xs mb-1" style="color:#8b949e;">WiFi Drops</div>
+                      <div class="text-lg font-bold"
+                        :style="detail.stability.drops>0 ? 'color:#f85149' : 'color:#3fb950'"
+                        x-text="detail.stability.drops"></div>
+                    </div>
+                    <div class="rounded p-3" style="background:#0d1117;border:1px solid #21262d;">
+                      <div class="text-xs mb-1" style="color:#8b949e;">Duration</div>
+                      <div class="text-lg font-bold" style="color:#e6edf3;"
+                        x-text="Math.round((detail.stability.duration_s||0)/3600*10)/10 + 'h'"></div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <!-- AI Report tab -->
+            <div x-show="detailTab==='ai'" class="overflow-y-auto flex-1 p-4">
+              <div x-show="!detail.ai_report" class="text-sm" style="color:#484f58;">No AI report for this run.</div>
+              <div x-show="detail.ai_report" class="md text-sm" x-html="md(detail.ai_report)"></div>
+            </div>
+          </div>
+        </template>
+
+        <!-- Loading -->
+        <div x-show="selectedId && !detail" class="flex-1 flex items-center justify-center" style="color:#8b949e;">
+          <span class="text-sm">Loading…</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Trend Chart ── -->
+    <div class="rounded-lg p-4" style="background:#161b22;border:1px solid #30363d;">
+      <div class="text-xs font-semibold mb-3" style="color:#8b949e;letter-spacing:.05em;"
+        x-text="page==='stability' ? 'STABILITY — THROUGHPUT TREND' : 'RF — PASS / FAIL TREND'"></div>
+      <canvas id="chart" height="70"></canvas>
+    </div>
+
+  </div><!-- /content -->
+
+  <!-- ── Live Log Drawer ── -->
+  <div x-show="logVisible" class="border-t flex-shrink-0" style="border-color:#30363d;">
+    <div class="flex items-center justify-between px-4 py-2" style="background:#161b22;">
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-orange-400 pulse"></span>
+        <span class="text-xs" style="color:#8b949e;">Live Log</span>
+        <span class="text-xs font-mono" style="color:#484f58;" x-text="status.log_file || ''"></span>
+      </div>
+      <button @click="logOpen=!logOpen" class="text-xs transition-colors" style="color:#484f58;"
+        onmouseover="this.style.color='#8b949e'" onmouseout="this.style.color='#484f58'"
+        x-text="logOpen ? '▼ Hide' : '▲ Show'"></button>
+    </div>
+    <div x-show="logOpen" class="overflow-y-auto font-mono text-xs p-3 max-h-36"
+      style="background:#010409;" id="logBox">
+      <template x-for="(line,i) in logLines" :key="i">
+        <div class="leading-5 whitespace-pre" style="color:#4eca6a;" x-text="line"></div>
+      </template>
+    </div>
+  </div>
+
+</div><!-- /main -->
+
+<!-- ═══════════════════════ SCRIPT ═══════════════════════ -->
+<script>
+function app() {
+  return {
+    page:      'rf',
+    runs:      [],
+    status:    { running: false },
+    selectedId: null,
+    detail:    null,
+    detailTab: 'cases',
+    logLines:  [],
+    logOpen:   true,
+    chart:     null,
+
+    // ── computed ──────────────────────────────────────
+    get pageRuns() {
+      return this.runs.filter(r => this.page === 'stability'
+        ? r.type === 'stability' : r.type !== 'stability')
+    },
+    get passRate() {
+      const rf = this.pageRuns.filter(r => r.total > 0)
+      if (!rf.length) return 100
+      const p = rf.reduce((s,r) => s+r.passed, 0)
+      const t = rf.reduce((s,r) => s+r.total,  0)
+      return Math.round(p/t*100)
+    },
+    get stabilityAvgDL() {
+      const runs = this.pageRuns.filter(r => r.stability?.dl_avg_mbps)
+      if (!runs.length) return '—'
+      const avg = runs.reduce((s,r) => s+r.stability.dl_avg_mbps, 0) / runs.length
+      return Math.round(avg*10)/10
+    },
+    get totalDrops() {
+      return this.pageRuns.reduce((s,r) => s+(r.stability?.drops||0), 0)
+    },
+    get lastRunTime() {
+      return this.runs[0] ? this.fmtDate(this.runs[0].timestamp) : ''
+    },
+    get logVisible() {
+      return this.status.running
+    },
+
+    // ── lifecycle ─────────────────────────────────────
+    async init() {
+      await this.refresh()
+      setInterval(() => this.poll(), 3000)
+    },
+
+    async refresh() {
+      const [runsRes, statusRes] = await Promise.all([
+        fetch('/api/runs').then(r=>r.json()).catch(()=>[]),
+        fetch('/api/status').then(r=>r.json()).catch(()=>({running:false})),
+      ])
+      this.runs   = runsRes
+      this.status = statusRes
+      this.$nextTick(() => this.drawChart())
+    },
+
+    async poll() {
+      const prev = this.status.running
+      this.status = await fetch('/api/status').then(r=>r.json()).catch(()=>this.status)
+      if (prev && !this.status.running) {
+        await this.refresh()
+        this.logLines.push('', '[TEST FINISHED]')
+      }
+    },
+
+    setPage(p) {
+      this.page = p
+      this.selectedId = null
+      this.detail = null
+      this.$nextTick(() => this.drawChart())
+    },
+
+    // ── run detail ────────────────────────────────────
+    async selectRun(run) {
+      this.selectedId = run.id
+      this.detail = null
+      this.detailTab = 'cases'
+      this.detail = await fetch(`/api/runs/${run.id}`).then(r=>r.json())
+    },
+
+    // ── trigger / stop ────────────────────────────────
+    async trigger(mode) {
+      const res = await fetch('/api/trigger', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({mode}),
+      }).then(r=>r.json())
+
+      if (res.status === 'already_running') {
+        alert('A test is already running (PID '+res.pid+')')
+        return
+      }
+      this.status = { running: true, pid: res.pid, log_file: res.log_file, mode }
+      this.logLines = []
+      this.logOpen  = true
+      this.startLogStream()
+    },
+
+    async stopTest() {
+      await fetch('/api/trigger', { method:'DELETE' })
+      this.status = { running: false }
+    },
+
+    // ── SSE log stream ────────────────────────────────
+    startLogStream() {
+      const es = new EventSource('/api/log/stream')
+      es.onmessage = e => {
+        if (e.data === '[DONE]') { es.close(); this.refresh(); return }
+        this.logLines.push(e.data)
+        if (this.logLines.length > 300) this.logLines.shift()
+        this.$nextTick(() => {
+          const b = document.getElementById('logBox')
+          if (b) b.scrollTop = b.scrollHeight
+        })
+      }
+      es.onerror = () => es.close()
+    },
+
+    // ── chart ─────────────────────────────────────────
+    drawChart() {
+      const ctx = document.getElementById('chart')
+      if (!ctx) return
+      if (this.chart) { this.chart.destroy(); this.chart = null }
+
+      const grid  = { color:'#21262d' }
+      const ticks = { color:'#8b949e', font:{size:10} }
+
+      if (this.page === 'stability') {
+        const runs = [...this.pageRuns].filter(r => r.stability?.dl_avg_mbps).reverse().slice(-15)
+        this.chart = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: runs.map(r => this.fmtDate(r.timestamp).slice(5,11)),
+            datasets: [
+              { label:'DL Mbps', data: runs.map(r=>r.stability.dl_avg_mbps),
+                borderColor:'#58a6ff', backgroundColor:'#58a6ff22', tension:.3, fill:true, pointRadius:3 },
+              { label:'UL Mbps', data: runs.map(r=>r.stability.ul_avg_mbps),
+                borderColor:'#bc8cff', backgroundColor:'transparent', tension:.3, borderDash:[4,3], pointRadius:3 },
+            ]
+          },
+          options: { responsive:true, plugins:{legend:{labels:{color:'#8b949e',boxWidth:12}}},
+            scales:{x:{ticks,grid},y:{ticks,grid,beginAtZero:false}} }
+        })
+      } else {
+        const runs = [...this.pageRuns].filter(r=>r.total>0).reverse().slice(-20)
+        this.chart = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels: runs.map(r => this.fmtDate(r.timestamp).slice(5,11)),
+            datasets: [
+              { label:'Passed', data: runs.map(r=>r.passed),
+                backgroundColor:'#3fb95040', borderColor:'#3fb950', borderWidth:1 },
+              { label:'Failed', data: runs.map(r=>r.failed),
+                backgroundColor:'#f8514940', borderColor:'#f85149', borderWidth:1 },
+            ]
+          },
+          options: { responsive:true, plugins:{legend:{labels:{color:'#8b949e',boxWidth:12}}},
+            scales:{x:{ticks,grid,stacked:false},y:{ticks,grid,beginAtZero:true}} }
+        })
+      }
+    },
+
+    // ── utils ─────────────────────────────────────────
+    fmtDate(ts) {
+      if (!ts) return '—'
+      const m = ts.match(/(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})/)
+      return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}` : ts
+    },
+    md(text) {
+      return text ? marked.parse(text) : ''
+    },
+  }
+}
+</script>
+</body>
+</html>

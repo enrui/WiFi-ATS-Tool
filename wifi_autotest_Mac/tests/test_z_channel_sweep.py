@@ -56,7 +56,7 @@ SWEEP_CFG = {
         "radio":           "wifi2",
         "channels":        [1, 5, 9, 13, 17],
         "htmode":          "EHT80",   # EHT80 for flexible channel selection
-        "restore_channel": "auto",
+        "restore_channel": "33",      # fixed ch33 — avoids BPI phy#2 center-freq mismatch when using "auto"
         "restore_htmode":  "EHT320",
         "throughput_min":  150,  # Mbps TCP DL
     },

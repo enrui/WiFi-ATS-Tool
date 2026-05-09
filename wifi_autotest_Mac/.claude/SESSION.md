@@ -485,3 +485,22 @@ picocom -b 115200 /dev/tty.usbserial-XXXX
 ### 版本歷程
 - 2026-04-25：Phase 1 初版，smoke + association + throughput 全綠（13 RF tests）
 - 2026-04-26：新增 legacy compat（7 tests）、channel sweep（15 tests）；修正 MT7996 SAE ExternalAuth bug（section 9.7）；記錄 disable_he 不支援（section 9.8）；補充 DUT MLO 介面命名（section 9.9）
+- 2026-05-04：診斷 6G 關聯間歇失敗根因（center1 mismatch）；修正 restore_channel 改為固定 ch33（section 9.12）
+
+### 9.12 6G 關聯間歇失敗：channel sweep restore_channel=auto（2026-05-04）
+
+**症狀**：`test_association[6G]`、`test_legacy_compat::TestLegacyCompat6G`、全部 `TestThroughput6G` 失敗，錯誤為 `BPI did not associate within 20s`，但 2.4G / 5G 全過，且 6G channel sweep 也全過。
+
+**診斷過程**：
+- BPI 上 `iw dev apclix0 scan` 可掃到 `Gemtek_Wi-Fi7_1EA7DD_6`（SSID 存在）
+- DUT `mld4`：ch33 (6115 MHz), 320 MHz, **center1: 6105 MHz**
+- BPI `apclix0`（未連線態）：ch33 (6115 MHz), 320 MHz, **center1: 6265 MHz**
+- 兩端 regulatory domain 都是 US/FCC，不是國碼問題
+
+**根本原因**：
+`test_z_channel_sweep.py` 的 6G sweep 結束後，`restore_channel="auto"` 讓 DUT ACS 自選頻道，選到 ch33 但 center1 為 **6105 MHz**。BPI phy#2 的自身 AP（rax0/rax1）固定在 center1: **6265 MHz**。由於 `apclix0`（client）與 `rax0/rax1`（AP）共用 phy#2，phy 無法同時工作在兩個不同的 320 MHz block，造成 association 失敗。以前跑過 PASS 是因為 DUT 的 auto 選到的 center 剛好與 BPI phy 對齊，是偶發性的。
+
+**修正**：
+`tests/test_z_channel_sweep.py` 的 `SWEEP_CFG["6G"]["restore_channel"]` 從 `"auto"` 改為 `"33"`，固定 DUT sweep 後回到 ch33 center1: 6105 MHz。
+
+**⚠️ 注意**：若未來更換 BPI 韌體或調整 BPI 的 6G AP 設定（rax0/rax1 center 頻率），需確認 `restore_channel` 對應的 DUT center 是否仍與 BPI phy 對齊。
