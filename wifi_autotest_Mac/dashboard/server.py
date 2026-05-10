@@ -12,8 +12,10 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
+import platform
 import re
 import subprocess
 import xml.etree.ElementTree as ET
@@ -269,6 +271,126 @@ async def stream_log():
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
+
+
+# ---------------------------------------------------------------------------
+# Station status
+# ---------------------------------------------------------------------------
+def _ping(ip: str) -> bool:
+    try:
+        flag = "-t" if platform.system() == "Darwin" else "-W"
+        r = subprocess.run(
+            ["ping", "-c", "1", flag, "2", ip],
+            capture_output=True, timeout=5,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _check_pkg(pkg: str) -> bool:
+    try:
+        __import__(pkg)
+        return True
+    except ImportError:
+        return False
+
+
+def _check_iperf3() -> bool:
+    try:
+        r = subprocess.run(["iperf3", "--version"], capture_output=True, timeout=2)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _read_env_key() -> tuple[bool, str]:
+    env_file = PROJECT_ROOT / ".env"
+    val = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not val and env_file.exists():
+        for line in env_file.read_text().splitlines():
+            if line.startswith("ANTHROPIC_API_KEY="):
+                val = line.split("=", 1)[1].strip().strip("'\"")
+    if val:
+        preview = val[:12] + "..." + val[-4:] if len(val) > 16 else "***"
+        return True, preview
+    return False, ""
+
+
+@app.get("/api/station/status")
+async def station_status():
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor() as ex:
+        dut_f = loop.run_in_executor(ex, _ping, "192.168.99.1")
+        bpi_f = loop.run_in_executor(ex, _ping, "192.168.99.100")
+        dut_ok, bpi_ok = await asyncio.gather(dut_f, bpi_f)
+
+    api_set, api_preview = _read_env_key()
+
+    packages = {
+        "pytest":    _check_pkg("pytest"),
+        "paramiko":  _check_pkg("paramiko"),
+        "anthropic": _check_pkg("anthropic"),
+        "fastapi":   _check_pkg("fastapi"),
+        "uvicorn":   _check_pkg("uvicorn"),
+        "iperf3":    _check_iperf3(),
+    }
+
+    return {
+        "nodes": {
+            "dut": {"ip": "192.168.99.1",   "ok": dut_ok},
+            "bpi": {"ip": "192.168.99.100", "ok": bpi_ok},
+        },
+        "api_key":  {"set": api_set, "preview": api_preview},
+        "packages": packages,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+@app.get("/api/settings")
+def get_settings():
+    api_set, api_preview = _read_env_key()
+
+    dut_ip, bpi_ip = "192.168.99.1", "192.168.99.100"
+    config_file = PROJECT_ROOT / "config.yaml"
+    if config_file.exists():
+        try:
+            import yaml
+            with open(config_file) as f:
+                cfg = yaml.safe_load(f) or {}
+            dut_ip = cfg.get("dut", {}).get("host", dut_ip)
+            bpi_ip = cfg.get("bpi", {}).get("host", bpi_ip)
+        except Exception:
+            pass
+
+    return {
+        "api_key_set":     api_set,
+        "api_key_preview": api_preview,
+        "dut_ip":          dut_ip,
+        "bpi_ip":          bpi_ip,
+    }
+
+
+class SettingsReq(BaseModel):
+    api_key: Optional[str] = None
+
+
+@app.post("/api/settings")
+def save_settings(req: SettingsReq):
+    if req.api_key is not None:
+        env_file = PROJECT_ROOT / ".env"
+        lines = env_file.read_text().splitlines() if env_file.exists() else []
+        found = False
+        for i, line in enumerate(lines):
+            if line.startswith("ANTHROPIC_API_KEY="):
+                lines[i] = f"ANTHROPIC_API_KEY={req.api_key}"
+                found = True
+        if not found:
+            lines.append(f"ANTHROPIC_API_KEY={req.api_key}")
+        env_file.write_text("\n".join(lines) + "\n")
+    return {"status": "saved"}
 
 
 # Static files — mount last so API routes take priority

@@ -45,15 +45,18 @@
 ## 3. 專案結構與檔案職責
 
 ```
-wifi_autotest/
+wifi_autotest_Mac/          ← macOS 版（wifi_autotest_Ubuntu/ 結構相同）
 ├── README.md                ← 用戶 quickstart
 ├── conftest.py              ← pytest 共用 fixtures（session-scoped，必須在根目錄）
 ├── pytest.ini               ← pytest 設定 + markers（必須在根目錄）
 │
-├── bootstrap_testpc.sh      ← 自動偵測 macOS/Linux 安裝
+├── bootstrap_testpc.sh      ← 自動偵測 macOS/Linux 安裝（含 fastapi/uvicorn）
 ├── bootstrap_bpi.sh         ← SSH 進 BPI 安裝工具
-├── run_all.sh               ← End-to-end pipeline
+├── run_all.sh               ← End-to-end pipeline（smoke/rf 模式）
+├── run_bg.sh                ← 背景執行（回到 shell，PID + log 路徑輸出到 stdout）
 ├── run_stability.sh         ← 長時間穩定度 soak test 啟動器
+│
+├── .env                     ← ANTHROPIC_API_KEY（不入 git）
 │
 ├── docs/
 │   ├── SETUP.md             ← 實體接線手冊
@@ -71,10 +74,11 @@ wifi_autotest/
 │   └── logtools.py          ← Log redact + filter + truncate
 │
 ├── tools/
-│   ├── collect_logs.py      ← 從 DUT/BPI 抓 log
-│   ├── analyze_logs.py      ← 測試失敗時 SSH 進 DUT/BPI 收集即時診斷資料
-│   ├── generate_report.py   ← 從 run dir 產生單頁 HTML 摘要報告
-│   └── stability_runner.py  ← 穩定度 soak test 主邏輯
+│   ├── collect_logs.py         ← 從 DUT/BPI 抓 log
+│   ├── analyze_logs.py         ← 測試失敗時 SSH 進 DUT/BPI 收集即時診斷資料
+│   ├── generate_report.py      ← 從 run dir 產生單頁 HTML 摘要報告
+│   ├── stability_runner.py     ← 穩定度 soak test 主邏輯
+│   └── claude_api_analyze.py   ← Anthropic API 根因分析（claude-sonnet-4-6）
 │
 ├── tests/
 │   ├── test_smoke.py           ← 連通性測試（必跑）
@@ -83,8 +87,11 @@ wifi_autotest/
 │   ├── test_throughput.py      ← iperf3 效能（marker: rf）
 │   └── test_z_channel_sweep.py ← 全頻道效能掃描（最後跑，見 9.7）（marker: rf）
 │
-├── prompts/
-│   └── wifi_triage.md       ← Claude 分析的 system prompt
+├── dashboard/               ← 本機 Web Dashboard
+│   ├── server.py            ← FastAPI backend（port 8080）
+│   ├── requirements.txt     ← fastapi, uvicorn
+│   └── static/
+│       └── index.html       ← 單頁 SPA（Alpine.js + Chart.js + marked.js，無 build step）
 │
 ├── scripts/
 │   ├── macos_network_setup.sh  ← 互動式設 IP（macOS 專用）
@@ -98,15 +105,16 @@ wifi_autotest/
 
 ## 4. 關鍵設計決策（不要違反）
 
-### 6.1 AI 分析架構（不呼叫外部 API）
+### 6.1 AI 分析架構（Anthropic API）
 測試失敗後的 AI 分析流程：
 1. `analyze_logs.py` → SSH 進 DUT/BPI 執行診斷指令，寫 `live_diagnostics.json`
-2. `run_all.sh` → 呼叫 `claude --print "..."` 請 Claude Code CLI 讀取 run dir 的檔案做分析
-3. Claude Code 直接寫 `claude_report.md`
+2. `run_all.sh` → 呼叫 `tools/claude_api_analyze.py`，透過 **Anthropic API（claude-sonnet-4-6）** 分析
+3. `claude_api_analyze.py` 讀取 `live_diagnostics.json` + `pytest_stdout.log`，呼叫 API 後寫 `claude_report.md`
 4. `generate_report.py` 把 `claude_report.md` 渲染進 `summary_report.html`
 
-**不需要 ANTHROPIC_API_KEY**，分析用的是 Claude Code 已登入的 session。
+**需要 ANTHROPIC_API_KEY**，儲存在 `.env`（`ANTHROPIC_API_KEY=sk-ant-...`）或環境變數。
 **--skip-ai** 旗標可跳過步驟 2-3，只收集診斷資料。
+API key 可透過 Dashboard > Settings 頁面在網頁上直接設定。
 
 ### 6.2 Fixture 是 session-scoped
 `conftest.py` 裡的 `dut_ssh`、`bpi_ssh`、`dut_serial` **故意設計成整個 pytest session 共用一個連線**。原因：
@@ -336,10 +344,13 @@ ieee80211w=0
 
 **這個問題在乾淨開機後不存在**（只有 channel sweep 後才發生），且已被 section 9.7 的架構解法（channel sweep 最後跑）覆蓋。如果未來需要在 sweep 後繼續跑其他 6G 測試，唯一可靠的做法是：**重啟 BPI**。
 
-### 9.11 AI 分析不需要 ANTHROPIC_API_KEY
-- `run_all.sh` 呼叫的是 `claude --print`（Claude Code CLI），用的是 EJ 已登入的 Claude Code session
-- **不需要也不應該用 ANTHROPIC_API_KEY**，那是舊架構的遺留物
-- 若 `claude` CLI 不存在（`which claude` 無輸出），安裝方式：`npm install -g @anthropic-ai/claude-code`
+### 9.11 Anthropic API 分析需要 ANTHROPIC_API_KEY
+- `run_all.sh` 呼叫的是 `tools/claude_api_analyze.py`（Python Anthropic SDK），**不是** `claude --print`
+- **需要** `ANTHROPIC_API_KEY`，設定方式（擇一）：
+  - 在 `.env` 加 `ANTHROPIC_API_KEY=sk-ant-...`（推薦，`run_all.sh` 會自動 `source .env`）
+  - 或透過 Dashboard > Settings 頁面在網頁上設定
+- 使用模型：`claude-sonnet-4-6`
+- `--skip-ai` 旗標可略過 API 呼叫，只跑測試 + 收集診斷資料
 
 ---
 
@@ -479,13 +490,78 @@ picocom -b 115200 /dev/tty.usbserial-XXXX
 2. 跟 EJ 確認哪邊正確
 3. 修正這份文件（你可以直接改）
 
-文件版本：Phase 1 PoC 完成，2026-04-26（35 RF + 4 smoke tests 全綠，含 legacy compat + channel sweep）
+文件版本：Phase 1 PoC 完成 + Dashboard v1，2026-05-10
 下次大幅更新時機：Phase 2 啟動（加入 firmware 燒錄）
 
 ### 版本歷程
 - 2026-04-25：Phase 1 初版，smoke + association + throughput 全綠（13 RF tests）
 - 2026-04-26：新增 legacy compat（7 tests）、channel sweep（15 tests）；修正 MT7996 SAE ExternalAuth bug（section 9.7）；記錄 disable_he 不支援（section 9.8）；補充 DUT MLO 介面命名（section 9.9）
 - 2026-05-04：診斷 6G 關聯間歇失敗根因（center1 mismatch）；修正 restore_channel 改為固定 ch33（section 9.12）
+- 2026-05-09：AI 分析改用 Anthropic API（`claude_api_analyze.py`）；新增 `run_bg.sh` 背景執行；Dashboard v1（FastAPI + Alpine.js）
+- 2026-05-10：Dashboard GUI 重構（sidebar: Dashboard/Status/Settings/Tests）；新增 Status 頁（ping DUT/BPI）、Settings 頁（API key 管理）、主題切換（Dark/Light）；執行按鈕移至 Dashboard Quick Actions；Tests 子頁各自有執行按鈕；記錄 ch13 EHT80 QCA driver bug（section 9.13）
+
+---
+
+## 13. Dashboard 操作指南
+
+### 啟動 Dashboard
+```bash
+cd wifi_autotest_Mac
+source .venv/bin/activate
+uvicorn dashboard.server:app --port 8080 --reload
+# 開瀏覽器 http://localhost:8080
+```
+
+### 頁面結構
+| 頁面 | 功能 |
+|------|------|
+| 📊 Dashboard | 概覽：RF runs 統計、Quick Actions（Run RF/Stability）、最近 runs 清單 |
+| 🖥 Status | 即時狀況：ping DUT/BPI、套件安裝狀況、API Key 是否設定 |
+| ⚙ Settings | 主題切換（Dark/Light）、ANTHROPIC_API_KEY 設定（寫入 .env）、DUT/BPI IP 顯示 |
+| 🧪 Tests > RF Tests | RF run 歷史、test case 詳情、AI Report tab、pass/fail 趨勢圖 |
+| 🧪 Tests > Stability | Stability run 歷史、soak test 摘要統計、throughput 趨勢圖 |
+
+### 重要 API endpoints
+| Endpoint | 說明 |
+|----------|------|
+| `GET /api/runs` | 所有 run 摘要（最多 60 筆） |
+| `GET /api/runs/{id}` | 單次 run 詳情 + AI report |
+| `POST /api/trigger` | 觸發測試（body: `{"mode":"rf"}` / `"stability"` / `"rf stability"`） |
+| `DELETE /api/trigger` | 中止執行中的測試（SIGTERM） |
+| `GET /api/status` | 目前執行狀態（running/idle、PID、log 路徑） |
+| `GET /api/log/stream` | SSE live log stream |
+| `GET /api/station/status` | DUT/BPI ping + 套件狀況 + API key 狀態 |
+| `GET /api/settings` | 讀取 .env + config.yaml 設定 |
+| `POST /api/settings` | 更新 .env 的 ANTHROPIC_API_KEY |
+
+### 狀態檔
+Dashboard 透過 `/tmp/wifi_ats_state.json` 追蹤背景執行進程：
+```json
+{"pid": 12345, "log_file": "/path/to/bg_run.log", "mode": "rf"}
+```
+
+### 9.13 6G ch13 EHT80 QCA Driver 靜默失敗（2026-05-09）
+
+**症狀**：`TestChannelSweep6G::test_ch13` 失敗，錯誤 `BPI did not associate within 30s after channel change`。
+
+**診斷**（SSH 進 DUT 192.168.99.1 直接查）：
+- UCI 正確（`uci show wireless.wifi2` 顯示 ch13, EHT80）
+- 但 `iw dev wifi2 info` 顯示 **ch1, 20 MHz** ── driver 沒套用設定
+- `mld4` 介面消失（`iw dev` 看不到）、hostapd socket `/var/run/hostapd-wifi2/mld4` 不存在
+- dmesg：mld4 在 ch13 嘗試時被 tear down，**之後永遠沒有 recreate**
+- syslog：`apid.lua: command failed: No such device (-19)`
+- regulatory: US/FCC，6GHz 5925–7125 MHz 允許，不是國碼問題
+
+**根本原因**：QCA（Qualcomm）driver 對 6G ch13 EHT80（center ch7）靜默拒絕 VDEV 建立。Ch13 是 80 MHz block {ch1,5,9,13} 的最高頻道，center ch7。firmware 允許 ch1/5/9 作 primary 但不允許 ch13，估計是 firmware edge case。
+
+**影響**：driver 卡住後，即使 restore 到 ch33 EHT320 也無法恢復（mld4 仍不出現），需完整 `wifi` restart 甚至 reboot。
+
+**目前未修正**：ch13 在 sweep list 中保留，測試 FAIL 被記錄為已知 QCA driver 限制。
+**候選修法**（尚未決定）：
+- A) 從 sweep list 移除 ch13，改用 ch21（相鄰 PSC，不受限）
+- B) sweep 失敗後加 driver recovery 邏輯（detect mld4 消失 → `wifi down && wifi up`）
+
+---
 
 ### 9.12 6G 關聯間歇失敗：channel sweep restore_channel=auto（2026-05-04）
 
