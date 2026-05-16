@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+dashboard/frontend/.vscode/
+
+# Build artifacts (keep dashboard/static/ — it's the compiled frontend)
+dashboard/frontend/src/assets/hero.png
+dashboard/frontend/src/assets/vite.svg
+dashboard/frontend/src/assets/vue.svg
+dashboard/frontend/src/components/HelloWorld.vue
+
+# Env / secrets
+.env
+
+# macOS
+.DS_Store
+
+# Test runs (large data, not source)
+runs/
