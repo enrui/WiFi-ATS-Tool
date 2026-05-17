@@ -54,8 +54,8 @@ export const useAppStore = defineStore('app', () => {
     if (prev && !status.value.running) await refresh()
   }
 
-  async function trigger(mode: string) {
-    const res = await api.trigger(mode)
+  async function trigger(mode: string, iterations = 0) {
+    const res = await api.trigger(mode, iterations)
     if (res.status === 'already_running') return res
     status.value = { running: true, pid: res.pid, log_file: res.log_file, mode }
     return res

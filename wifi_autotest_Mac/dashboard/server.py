@@ -18,7 +18,9 @@ import os
 import platform
 import re
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -87,14 +89,32 @@ def _parse_junit(run_dir: Path) -> dict:
 
 
 def _run_info(run_dir: Path) -> dict:
-    name = run_dir.name
+    name         = run_dir.name
     is_stability = name.startswith("stability-")
-    ts = name.replace("stability-", "")
+    is_reset     = name.startswith("reset-")
+    ts = re.sub(r"^(stability|reset)-", "", name)
 
-    info: dict = {"id": name, "timestamp": ts,
-                  "type": "stability" if is_stability else "rf"}
+    run_type = "stability" if is_stability else ("reset" if is_reset else "rf")
+    info: dict = {"id": name, "timestamp": ts, "type": run_type}
 
-    if is_stability:
+    if is_reset:
+        result_file = run_dir / "result.json"
+        info.update({"total": 0, "passed": 0, "failed": 0})
+        if result_file.exists():
+            try:
+                r = json.loads(result_file.read_text())
+                info["reset"] = {
+                    "total":   r.get("total",   0),
+                    "success": r.get("success", 0),
+                    "failure": r.get("failure", 0),
+                    "result":  r.get("result",  "—"),
+                }
+                info["total"]  = r.get("total",   0)
+                info["passed"] = r.get("success", 0)
+                info["failed"] = r.get("failure", 0)
+            except Exception:
+                pass
+    elif is_stability:
         info.update({"total": 0, "passed": 0, "failed": 0})
         data_file = run_dir / "stability_data.json"
         if data_file.exists():
@@ -170,8 +190,19 @@ def get_run(run_id: str):
         raise HTTPException(404, "Run not found")
     info = _run_info(run_dir)
 
-    if info["type"] != "stability":
+    if info["type"] == "rf":
         info["cases"] = _parse_junit(run_dir)["cases"]
+
+    if info["type"] == "reset":
+        result_file = run_dir / "result.json"
+        if result_file.exists():
+            try:
+                info["reset_detail"] = json.loads(result_file.read_text())
+            except Exception:
+                pass
+        log_file = run_dir / "reset_test.log"
+        if log_file.exists():
+            info["log"] = log_file.read_text(errors="replace")[-8000:]
 
     ai = run_dir / "claude_report.md"
     if ai.exists():
@@ -188,7 +219,8 @@ def get_run(run_id: str):
 
 
 class TriggerReq(BaseModel):
-    mode: str = "rf"   # "rf" | "stability" | "rf stability"
+    mode: str = "rf"          # "rf" | "stability" | "rf stability" | "reset"
+    iterations: int = 0       # for reset mode: 0 = infinite
 
 
 @app.post("/api/trigger")
@@ -197,6 +229,31 @@ def trigger(req: TriggerReq):
     if state.get("pid") and _is_running(state["pid"]):
         return {"status": "already_running", "pid": state["pid"]}
 
+    # ── Reset stress test ────────────────────────────────────────────────────
+    if req.mode == "reset":
+        reset_script = PROJECT_ROOT / "scripts" / "reset_test.py"
+        if not reset_script.exists():
+            raise HTTPException(500, f"reset_test.py not found at {reset_script}")
+
+        venv_python = PROJECT_ROOT / ".venv" / "bin" / "python3"
+        python_bin  = str(venv_python) if venv_python.exists() else sys.executable
+
+        cmd = [python_bin, str(reset_script),
+               "--config", str(PROJECT_ROOT / "config.yaml")]
+        if req.iterations > 0:
+            cmd += ["--iterations", str(req.iterations)]
+
+        stamp    = datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_path = str(PROJECT_ROOT / "runs" / f"reset_bg_{stamp}.log")
+
+        with open(log_path, "w") as lf:
+            proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT),
+                                    stdout=lf, stderr=lf)
+        pid = proc.pid
+        _write_state({"pid": pid, "log_file": log_path, "mode": "reset"})
+        return {"status": "started", "pid": pid, "log_file": log_path}
+
+    # ── RF / Stability ───────────────────────────────────────────────────────
     if not RUN_BG.exists():
         raise HTTPException(500, f"run_bg.sh not found at {RUN_BG}")
 
@@ -274,6 +331,21 @@ async def stream_log():
 
 
 # ---------------------------------------------------------------------------
+# Config helper
+# ---------------------------------------------------------------------------
+def _read_config() -> dict:
+    config_file = PROJECT_ROOT / "config.yaml"
+    if not config_file.exists():
+        return {}
+    try:
+        import yaml
+        with open(config_file) as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
 # Station status
 # ---------------------------------------------------------------------------
 def _ping(ip: str) -> bool:
@@ -319,27 +391,32 @@ def _read_env_key() -> tuple[bool, str]:
 
 @app.get("/api/station/status")
 async def station_status():
+    cfg     = _read_config()
+    dut_ip  = cfg.get("dut", {}).get("host",     "192.168.99.1")
+    bpi_ip  = cfg.get("bpi_sta", {}).get("host", "192.168.99.100")
+
     loop = asyncio.get_event_loop()
     with concurrent.futures.ThreadPoolExecutor() as ex:
-        dut_f = loop.run_in_executor(ex, _ping, "192.168.99.1")
-        bpi_f = loop.run_in_executor(ex, _ping, "192.168.99.100")
+        dut_f = loop.run_in_executor(ex, _ping, dut_ip)
+        bpi_f = loop.run_in_executor(ex, _ping, bpi_ip)
         dut_ok, bpi_ok = await asyncio.gather(dut_f, bpi_f)
 
     api_set, api_preview = _read_env_key()
 
     packages = {
-        "pytest":    _check_pkg("pytest"),
-        "paramiko":  _check_pkg("paramiko"),
-        "anthropic": _check_pkg("anthropic"),
-        "fastapi":   _check_pkg("fastapi"),
-        "uvicorn":   _check_pkg("uvicorn"),
-        "iperf3":    _check_iperf3(),
+        "pytest":     _check_pkg("pytest"),
+        "paramiko":   _check_pkg("paramiko"),
+        "anthropic":  _check_pkg("anthropic"),
+        "fastapi":    _check_pkg("fastapi"),
+        "playwright": _check_pkg("playwright"),
+        "serial":     _check_pkg("serial"),
+        "iperf3":     _check_iperf3(),
     }
 
     return {
         "nodes": {
-            "dut": {"ip": "192.168.99.1",   "ok": dut_ok},
-            "bpi": {"ip": "192.168.99.100", "ok": bpi_ok},
+            "dut": {"ip": dut_ip, "ok": dut_ok},
+            "bpi": {"ip": bpi_ip, "ok": bpi_ok},
         },
         "api_key":  {"set": api_set, "preview": api_preview},
         "packages": packages,
@@ -352,33 +429,36 @@ async def station_status():
 @app.get("/api/settings")
 def get_settings():
     api_set, api_preview = _read_env_key()
-
-    dut_ip, bpi_ip = "192.168.99.1", "192.168.99.100"
-    config_file = PROJECT_ROOT / "config.yaml"
-    if config_file.exists():
-        try:
-            import yaml
-            with open(config_file) as f:
-                cfg = yaml.safe_load(f) or {}
-            dut_ip = cfg.get("dut", {}).get("host", dut_ip)
-            bpi_ip = cfg.get("bpi", {}).get("host", bpi_ip)
-        except Exception:
-            pass
-
+    cfg = _read_config()
+    dut = cfg.get("dut", {})
+    bpi = cfg.get("bpi_sta", {})
     return {
         "api_key_set":     api_set,
         "api_key_preview": api_preview,
-        "dut_ip":          dut_ip,
-        "bpi_ip":          bpi_ip,
+        "dut_ip":          dut.get("host",         "192.168.99.1"),
+        "bpi_ip":          bpi.get("host",         "192.168.99.100"),
+        "serial_port":     dut.get("serial_port",  "/dev/tty.usbserial-0001"),
+        "serial_baud":     int(dut.get("serial_baud", 115200)),
+        "web_host":        dut.get("web_host",     "192.168.1.1"),
+        "web_user":        dut.get("web_user",     "admin"),
+        "web_password":    dut.get("web_password", "admin"),
     }
 
 
 class SettingsReq(BaseModel):
-    api_key: Optional[str] = None
+    api_key:      Optional[str] = None
+    dut_ip:       Optional[str] = None
+    bpi_ip:       Optional[str] = None
+    serial_port:  Optional[str] = None
+    serial_baud:  Optional[int] = None
+    web_host:     Optional[str] = None
+    web_user:     Optional[str] = None
+    web_password: Optional[str] = None
 
 
 @app.post("/api/settings")
 def save_settings(req: SettingsReq):
+    # ── .env: API key ────────────────────────────────────────────────────────
     if req.api_key is not None:
         env_file = PROJECT_ROOT / ".env"
         lines = env_file.read_text().splitlines() if env_file.exists() else []
@@ -390,6 +470,31 @@ def save_settings(req: SettingsReq):
         if not found:
             lines.append(f"ANTHROPIC_API_KEY={req.api_key}")
         env_file.write_text("\n".join(lines) + "\n")
+
+    # ── config.yaml: network / serial / web ──────────────────────────────────
+    yaml_fields = {
+        "dut_ip":      ("dut",     "host"),
+        "serial_port": ("dut",     "serial_port"),
+        "serial_baud": ("dut",     "serial_baud"),
+        "web_host":    ("dut",     "web_host"),
+        "web_user":    ("dut",     "web_user"),
+        "web_password":("dut",     "web_password"),
+        "bpi_ip":      ("bpi_sta", "host"),
+    }
+    updates = {k: getattr(req, k) for k in yaml_fields if getattr(req, k) is not None}
+    if updates:
+        try:
+            import yaml
+            config_file = PROJECT_ROOT / "config.yaml"
+            cfg = yaml.safe_load(config_file.read_text()) or {} if config_file.exists() else {}
+            for req_key, (section, yaml_key) in yaml_fields.items():
+                val = getattr(req, req_key)
+                if val is not None:
+                    cfg.setdefault(section, {})[yaml_key] = val
+            config_file.write_text(yaml.dump(cfg, allow_unicode=True, default_flow_style=False))
+        except Exception as e:
+            raise HTTPException(500, f"Failed to write config.yaml: {e}")
+
     return {"status": "saved"}
 
 

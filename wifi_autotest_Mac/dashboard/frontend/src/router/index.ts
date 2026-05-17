@@ -14,6 +14,7 @@ export default createRouter({
         { path: 'settings',         component: () => import('@/views/SettingsView.vue') },
         { path: 'tests/rf',         component: () => import('@/views/tests/RFTestsView.vue') },
         { path: 'tests/stability',  component: () => import('@/views/tests/StabilityView.vue') },
+        { path: 'stress/reset',     component: () => import('@/views/stress/ResetTestView.vue') },
       ],
     },
   ],

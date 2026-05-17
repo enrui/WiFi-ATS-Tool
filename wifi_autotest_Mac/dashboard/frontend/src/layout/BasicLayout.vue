@@ -5,6 +5,7 @@ import { NIcon, type MenuOption } from 'naive-ui'
 import {
   GridOutline, PulseOutline, SettingsOutline,
   FlaskOutline, WifiOutline, TimerOutline,
+  Barbell, RefreshOutline,
 } from '@vicons/ionicons5'
 import { useAppStore } from '@/stores/app'
 
@@ -28,6 +29,12 @@ const menuOptions: MenuOption[] = [
     children: [
       { label: 'RF Tests',   key: '/tests/rf',        icon: icon(WifiOutline) },
       { label: 'Stability',  key: '/tests/stability', icon: icon(TimerOutline) },
+    ],
+  },
+  {
+    label: 'Stress Test', key: 'stress', icon: icon(Barbell),
+    children: [
+      { label: 'Reset Test', key: '/stress/reset', icon: icon(RefreshOutline) },
     ],
   },
 ]
@@ -74,7 +81,7 @@ onUnmounted(() => clearInterval(timer))
         :collapsed-width="64"
         :options="menuOptions"
         :value="activeKey"
-        :default-expanded-keys="['tests']"
+        :default-expanded-keys="['tests', 'stress']"
         accordion
         @update:value="handleMenu"
       />
