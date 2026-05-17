@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { h, ref, computed, onMounted } from 'vue'
+import { h, ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { NTag, useMessage } from 'naive-ui'
 import { api, type Run, type RunDetail } from '@/api'
 import { useAppStore } from '@/stores/app'
@@ -7,7 +7,8 @@ import { useAppStore } from '@/stores/app'
 const store   = useAppStore()
 const message = useMessage()
 
-const runs       = ref<Run[]>([])
+const runs = computed(() => store.runs.filter((r: Run) => r.type === 'reset'))
+
 const detail     = ref<RunDetail | null>(null)
 const showModal  = ref(false)
 const loading    = ref(false)
@@ -17,9 +18,30 @@ const isResetRunning = computed(() =>
   store.status.running && store.status.mode === 'reset'
 )
 
-onMounted(async () => {
-  runs.value = (await api.runs()).filter((r: Run) => r.type === 'reset')
-})
+// ── Live log ──────────────────────────────────────────────────────────────────
+const liveLogContent = ref('')
+const liveLogEl      = ref<HTMLElement | null>(null)
+let liveTimer: ReturnType<typeof setInterval> | null = null
+
+async function fetchLiveLog() {
+  const res = await api.liveLog()
+  liveLogContent.value = res.content
+  await nextTick()
+  if (liveLogEl.value) liveLogEl.value.scrollTop = liveLogEl.value.scrollHeight
+}
+
+watch(isResetRunning, (running) => {
+  if (running) {
+    fetchLiveLog()
+    liveTimer = setInterval(fetchLiveLog, 2000)
+  } else {
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null }
+    fetchLiveLog()
+  }
+}, { immediate: true })
+
+onMounted(() => store.refresh())
+onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
 
 function fmtDate(ts?: string) {
   if (!ts) return '—'
@@ -94,7 +116,6 @@ async function runTest() {
     message.warning(`Already running (PID ${res.pid})`)
   } else {
     message.info(`Reset stress test started — ${n === 0 ? '∞' : n} cycles`)
-    runs.value = (await api.runs()).filter((r: Run) => r.type === 'reset')
   }
 }
 </script>
@@ -139,6 +160,20 @@ async function runTest() {
     </n-alert>
 
     <!-- ── History ── -->
+    <!-- ── Live Log ── -->
+    <n-card v-if="liveLogContent" size="small">
+      <template #header>
+        <n-space align="center" :size="8">
+          <span>Live Log</span>
+          <n-badge v-if="isResetRunning" dot processing type="warning" />
+          <n-text v-else depth="3" style="font-size:12px;">（已結束）</n-text>
+        </n-space>
+      </template>
+      <div ref="liveLogEl" style="max-height:320px;overflow-y:auto;background:var(--n-color);border-radius:4px;padding:8px;">
+        <pre style="font-size:11px;line-height:1.5;white-space:pre-wrap;margin:0;font-family:monospace;">{{ liveLogContent }}</pre>
+      </div>
+    </n-card>
+
     <n-card title="Reset Test History" size="small">
       <n-empty v-if="!runs.length" description="No reset test runs yet" />
       <n-data-table

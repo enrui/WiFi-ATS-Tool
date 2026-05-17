@@ -21,6 +21,7 @@ import argparse
 import json
 import signal
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -38,7 +39,8 @@ SERIAL_PORT  = "/dev/tty.usbserial-0001"
 BAUD_RATE    = 115200
 RESTORE_CMD  = "/opt/bin/restore_to_default.sh"
 
-WAIT_SSH_READY_SECS  = 10
+SSH_PASSWORD         = "password"   # root password (override in config or SSH_PASSWORD env)
+WAIT_SSH_READY_SECS  = 20
 WAIT_REBOOT_SECS     = 4 * 60
 LOGIN_TIMEOUT_MS     = 30_000
 BOOT_TIME_WARN_SECS  = 4 * 60
@@ -52,7 +54,7 @@ BOOT_DETECT_PATTERNS = [
 
 
 def _load_config(config_path: Path) -> None:
-    global DUT_HOST, WEB_USER, WEB_PASSWORD, SSH_USER, SERIAL_PORT, BAUD_RATE
+    global DUT_HOST, WEB_USER, WEB_PASSWORD, SSH_USER, SSH_PASSWORD, SERIAL_PORT, BAUD_RATE
     if not config_path.exists():
         return
     try:
@@ -64,6 +66,7 @@ def _load_config(config_path: Path) -> None:
         WEB_USER     = dut.get("web_user",     WEB_USER)
         WEB_PASSWORD = dut.get("web_password", WEB_PASSWORD)
         SSH_USER     = dut.get("ssh_user",     SSH_USER)
+        SSH_PASSWORD = dut.get("ssh_password", SSH_PASSWORD)
         SERIAL_PORT  = dut.get("serial_port",  SERIAL_PORT)
         BAUD_RATE    = int(dut.get("serial_baud", BAUD_RATE))
     except Exception as e:
@@ -83,19 +86,25 @@ def log(msg: str, level: str = "INFO") -> None:
 
 
 # ── Step 1: Browser — enable SSH ─────────────────────────────────────────────
-def browser_enable_ssh() -> bool:
+def browser_enable_ssh(run_dir: Path, iteration: int) -> bool:
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
     except ImportError:
         log("playwright not installed — skipping browser step", "WARN")
         return True
 
-    login_url = f"http://{DUT_HOST}/login.html"
-    main_url  = f"http://{DUT_HOST}/main.html"
+    login_url  = f"http://{DUT_HOST}/login.html"
+    main_url   = f"http://{DUT_HOST}/main.html"
+    video_dir  = run_dir / "video"
+    video_dir.mkdir(exist_ok=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page    = browser.new_context().new_page()
+        context = browser.new_context(
+            record_video_dir=str(video_dir),
+            record_video_size={"width": 1280, "height": 720},
+        )
+        page = context.new_page()
         try:
             # ── Login ──────────────────────────────────────────────────────
             log(f"Browser: 開啟 {login_url}")
@@ -118,118 +127,156 @@ def browser_enable_ssh() -> bool:
             # ── Force navigate to main.html ────────────────────────────────
             log(f"Browser: 強制跳轉 {main_url}")
             page.goto(main_url, timeout=LOGIN_TIMEOUT_MS)
-            page.wait_for_load_state("domcontentloaded")
+            page.wait_for_load_state("networkidle", timeout=LOGIN_TIMEOUT_MS)
             log(f"Browser: 目前 URL → {page.url}")
 
-            # ── Find SSH Service toggle ────────────────────────────────────
-            # Try common patterns: link/menu item named "SSH Service" or "SSH"
-            log("Browser: 尋找 Advanced Setup > SSH Service")
-            ssh_found = False
+            # ── Click Advanced Setup tab — wait for it to be clickable ─────
+            log("Browser: 等待 #menu_adv_setting_item 可點選…")
+            adv = page.locator("#menu_adv_setting_item")
+            adv.wait_for(state="visible", timeout=LOGIN_TIMEOUT_MS)
+            adv.click()
+            log("Browser: 點擊 Advanced Setup (#menu_adv_setting_item)")
 
-            # Try clicking the menu item first
-            for selector in [
-                "text=SSH Service",
-                "a:has-text('SSH Service')",
-                "a:has-text('SSH')",
-                "li:has-text('SSH Service') a",
-                "[href*='ssh']",
-            ]:
+            # ── Wait for SSH sub-tab to appear, then click ─────────────────
+            ssh_tab = page.locator("#menu_adv_setting_ssh_item")
+            ssh_tab.wait_for(state="visible", timeout=10_000)
+            ssh_tab.click()
+            log("Browser: 點擊 SSH (#menu_adv_setting_ssh_item)")
+            time.sleep(1)
+
+            # ── Enable SSH toggle ──────────────────────────────────────────
+            # Wait for networkidle so the page JS has finished setting the
+            # checkbox state — reading is_checked() too early can return
+            # False even when SSH is already ON, causing us to toggle it OFF.
+            try:
+                page.wait_for_load_state("networkidle", timeout=10_000)
+            except PwTimeout:
+                pass
+
+            chk = page.locator("#ssh_enabled")
+            chk.wait_for(state="attached", timeout=10_000)
+
+            # Read the input value directly via JS to get the true current state
+            ssh_val = chk.evaluate("el => el.value")
+            is_on   = ssh_val not in ("0", "false", "", "off", None)
+            log(f"Browser: SSH 目前狀態 = {'ON' if is_on else 'OFF'} (value={ssh_val!r})")
+
+            def _screenshot(tag: str) -> None:
+                shot = run_dir / f"browser_{tag}_iter{iteration:04d}.png"
                 try:
-                    el = page.locator(selector).first
-                    if el.is_visible(timeout=3000):
-                        el.click()
-                        page.wait_for_load_state("domcontentloaded")
-                        log(f"Browser: 點擊選單項目 ({selector})")
-                        ssh_found = True
-                        break
+                    page.screenshot(path=str(shot))
+                    log(f"Browser: 截圖 → {shot.name}")
                 except Exception:
                     pass
 
-            if not ssh_found:
-                log("Browser: 未找到 SSH Service 選單，嘗試直接導向 SSH 頁面", "WARN")
-                for ssh_path in ["/ssh.html", "/sshd.html", "/advanced_ssh.html",
-                                 "/services/ssh.html", "/admin/ssh.html"]:
-                    try:
-                        page.goto(f"http://{DUT_HOST}{ssh_path}", timeout=10_000)
-                        page.wait_for_load_state("domcontentloaded")
-                        if "404" not in page.title() and page.url.endswith(ssh_path):
-                            log(f"Browser: 直接導向 {ssh_path} 成功")
-                            ssh_found = True
-                            break
-                    except Exception:
-                        pass
+            if not is_on:
+                label = page.locator("label[for='ssh_enabled']")
+                if label.count() > 0:
+                    label.first.click()
+                    log("Browser: 點擊 label[for=ssh_enabled] 開啟 toggle")
+                else:
+                    chk.evaluate("el => { el.checked = true; el.dispatchEvent(new Event('change', {bubbles:true})); }")
+                    log("Browser: JS 設定 #ssh_enabled = true")
 
-            if not ssh_found:
-                log("Browser: 無法找到 SSH Service 頁面", "ERROR")
-                return False
+                # Verify via value
+                time.sleep(0.5)
+                val_after   = chk.evaluate("el => el.value")
+                is_on_after = val_after not in ("0", "false", "", "off", None)
+                log(f"Browser: toggle 後狀態 = {'ON' if is_on_after else 'OFF (異常)'} (value={val_after!r})")
+                if not is_on_after:
+                    _screenshot("toggle_fail")
+                    log("Browser: toggle 未切換成 ON", "ERROR")
+                    return False
 
-            # ── Enable SSH checkbox / toggle ───────────────────────────────
-            log("Browser: 尋找 Enable SSH 開關")
-            enabled = False
-            for chk_sel in [
-                "input[type='checkbox'][name*='ssh' i]",
-                "input[type='checkbox'][id*='ssh' i]",
-                "input[type='checkbox']:near(:text('Enable SSH'))",
-                "input[type='checkbox']:near(:text('SSH Service'))",
-                "input[type='checkbox']",   # fallback: first checkbox on page
-            ]:
-                try:
-                    chk = page.locator(chk_sel).first
-                    if chk.is_visible(timeout=3000):
-                        if not chk.is_checked():
-                            chk.check()
-                            log(f"Browser: 勾選 Enable SSH ({chk_sel})")
-                        else:
-                            log("Browser: Enable SSH 已勾選")
-                        enabled = True
-                        break
-                except Exception:
-                    pass
+            # ── Click Apply and wait for "Please wait..." to finish ────────
+            page.locator("#apply").click()
+            log("Browser: 點擊 #apply 儲存，等待 loading 完成…")
+            try:
+                page.wait_for_load_state("networkidle", timeout=20_000)
+            except PwTimeout:
+                pass  # continue even if still loading
+            _screenshot("after_apply")
 
-            if not enabled:
-                log("Browser: 未找到 SSH 勾選框", "WARN")
+            # ── Dismiss confirmation dialog (appears after loading) ────────
+            try:
+                dismiss = page.locator(
+                    "button:has-text('關閉'), a:has-text('關閉'), "
+                    "button:has-text('Close'), a:has-text('Close'), "
+                    "button:has-text('OK'), a:has-text('OK')"
+                ).first
+                dismiss.wait_for(state="visible", timeout=5_000)
+                dismiss.click()
+                log("Browser: 關閉確認 dialog")
+                time.sleep(0.5)
+            except PwTimeout:
+                log("Browser: 未出現確認 dialog，繼續")
+            time.sleep(1)
 
-            # ── Save / Apply ───────────────────────────────────────────────
-            log("Browser: 尋找 Save / Apply 按鈕")
-            for btn_sel in [
-                "button[type='submit']",
-                "input[type='submit']",
-                "button:has-text('Save')",
-                "button:has-text('Apply')",
-                "button:has-text('儲存')",
-                "input[value='Save']",
-                "input[value='Apply']",
-            ]:
-                try:
-                    btn = page.locator(btn_sel).first
-                    if btn.is_visible(timeout=3000):
-                        btn.click()
-                        log(f"Browser: 點擊儲存 ({btn_sel})")
-                        time.sleep(2)
-                        break
-                except Exception:
-                    pass
-
-            log("Browser: SSH Service 設定完成")
+            log("Browser: SSH Service 已啟用並儲存")
             return True
 
         except PwTimeout:
+            shot = run_dir / f"browser_timeout_iter{iteration:04d}.png"
+            try:
+                page.screenshot(path=str(shot))
+                log(f"Browser: 截圖已存 → {shot.name}", "WARN")
+            except Exception:
+                pass
             log(f"Browser: 逾時，URL={page.url}", "WARN")
             return False
         except Exception as e:
             log(f"Browser: 例外 — {e}", "ERROR")
             return False
         finally:
+            # Close context first — this finalises the video file
+            try:
+                video_path = page.video.path() if page.video else None
+                context.close()
+                if video_path:
+                    dest = video_dir / f"iter{iteration:04d}_browser.webm"
+                    Path(video_path).rename(dest)
+                    log(f"Browser: 錄影已存 → video/iter{iteration:04d}_browser.webm")
+            except Exception:
+                pass
             browser.close()
 
 
 # ── Step 2: SSH stress ────────────────────────────────────────────────────────
-def ssh_stress(cycles: int) -> list[dict]:
+def _ssh_once(pwd: str) -> tuple[bool, str]:
+    """Single SSH connect/exec/disconnect via sshpass+ssh subprocess.
+    Returns (success, error_message)."""
+    import subprocess as _sp
+    # sshpass -p <pwd> ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 user@host 'echo ok'
+    cmd = (["sshpass", "-p", pwd] if pwd else []) + [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=10",
+        "-o", f"BatchMode={'no' if pwd else 'yes'}",
+        f"{SSH_USER}@{DUT_HOST}",
+        "echo ok",
+    ]
     try:
-        import paramiko
-    except ImportError:
-        log("paramiko not installed — skipping SSH stress", "ERROR")
-        return []
+        r = _sp.run(cmd, capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            return True, ""
+        err = (r.stderr or r.stdout).strip().splitlines()[-1] if (r.stderr or r.stdout) else f"rc={r.returncode}"
+        return False, err[:120]
+    except FileNotFoundError:
+        return False, "sshpass not found"
+    except _sp.TimeoutExpired:
+        return False, "timeout"
+    except Exception as e:
+        return False, str(e)[:120]
+
+
+def ssh_stress(cycles: int) -> list[dict]:
+    # Build password candidates
+    passwords: list[str] = []
+    if SSH_PASSWORD:
+        passwords.append(SSH_PASSWORD)
+    for p in ("password", "", "admin"):
+        if p not in passwords:
+            passwords.append(p)
 
     results = []
     log(f"SSH stress: 開始 {cycles} 次連線測試 → {SSH_USER}@{DUT_HOST}")
@@ -237,43 +284,24 @@ def ssh_stress(cycles: int) -> list[dict]:
     for i in range(1, cycles + 1):
         t0     = time.time()
         result = {"cycle": i, "success": False, "time_ms": 0, "error": ""}
-        try:
-            client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-            # Try no-auth (none) then empty password
-            connected = False
-            for kwargs in [
-                {"username": SSH_USER, "look_for_keys": False, "allow_agent": False,
-                 "auth_timeout": 10},
-                {"username": SSH_USER, "password": "", "look_for_keys": False,
-                 "allow_agent": False, "auth_timeout": 10},
-            ]:
-                try:
-                    client.connect(DUT_HOST, port=22, timeout=15, **kwargs)
-                    connected = True
-                    break
-                except paramiko.AuthenticationException:
-                    pass
+        ok, err = False, ""
+        for pwd in passwords:
+            ok, err = _ssh_once(pwd)
+            if ok or err == "sshpass not found":
+                break
+            # wrong password → try next; connection refused → stop early
+            if "Connection refused" in err or "No route" in err:
+                break
 
-            if connected:
-                _, stdout, _ = client.exec_command("echo ok", timeout=5)
-                stdout.read()
-                result["success"] = True
-                log(f"SSH [{i:02d}/{cycles}] ✓  {int((time.time()-t0)*1000)} ms")
-            else:
-                result["error"] = "auth_failed"
-                log(f"SSH [{i:02d}/{cycles}] ✗  認證失敗", "WARN")
+        result["time_ms"] = int((time.time() - t0) * 1000)
+        result["success"]  = ok
+        result["error"]    = "" if ok else err
 
-        except Exception as e:
-            result["error"] = str(e)[:120]
-            log(f"SSH [{i:02d}/{cycles}] ✗  {result['error']}", "WARN")
-        finally:
-            result["time_ms"] = int((time.time() - t0) * 1000)
-            try:
-                client.close()
-            except Exception:
-                pass
+        if ok:
+            log(f"SSH [{i:02d}/{cycles}] ✓  {result['time_ms']} ms")
+        else:
+            log(f"SSH [{i:02d}/{cycles}] ✗  {err}", "WARN")
 
         results.append(result)
         time.sleep(0.5)
@@ -281,6 +309,50 @@ def ssh_stress(cycles: int) -> list[dict]:
     success = sum(1 for r in results if r["success"])
     log(f"SSH stress: 完成  ✓{success} / ✗{cycles - success} / 共{cycles}")
     return results
+
+
+# ── Serial full-session recorder ─────────────────────────────────────────────
+class SerialRecorder:
+    """Background thread that continuously reads the serial port and saves to a log file.
+    Must be stopped before serial_restore() or monitor_serial_boot() open the same port."""
+
+    def __init__(self, run_dir: Path, iteration: int):
+        self._path = run_dir / f"serial_full_iter{iteration:04d}.log"
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        try:
+            import serial as _serial
+        except ImportError:
+            log("pyserial not installed — serial recorder skipped", "WARN")
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        log(f"Serial recorder: 開始錄製 → {self._path.name}")
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=5)
+        self._thread = None
+        log(f"Serial recorder: 停止，已存 {self._path.name}")
+
+    def _run(self) -> None:
+        try:
+            import serial as _serial
+            with _serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1) as ser:
+                with open(self._path, "wb") as f:
+                    while not self._stop.is_set():
+                        chunk = ser.read(ser.in_waiting or 1)
+                        if chunk:
+                            f.write(chunk)
+                            f.flush()
+        except Exception as e:
+            with open(self._path, "ab") as f:
+                f.write(f"\n[recorder error: {e}]\n".encode())
 
 
 # ── Step 3: Serial restore ────────────────────────────────────────────────────
@@ -324,6 +396,8 @@ def monitor_serial_boot(iteration: int, secs: int, t_restore: float,
     boot_time_s   = 0.0
     bytes_cap     = 0
     buf           = b""
+    is_tty        = sys.stdout.isatty()
+    last_status_t = time.time()
 
     time.sleep(2)
     try:
@@ -332,9 +406,14 @@ def monitor_serial_boot(iteration: int, secs: int, t_restore: float,
                 while time.time() < end:
                     remaining = int(end - time.time())
                     mm, ss = divmod(remaining, 60)
-                    status = f"boot:{boot_time_s:.0f}s ✓" if boot_detected else "等待開機…"
-                    print(f"\r  {status}  剩餘 {mm:02d}:{ss:02d}  [serial: {bytes_cap} bytes]  ",
-                          end="", flush=True)
+                    if is_tty:
+                        status = f"boot:{boot_time_s:.0f}s ✓" if boot_detected else "等待開機…"
+                        print(f"\r  {status}  剩餘 {mm:02d}:{ss:02d}  [serial: {bytes_cap} bytes]  ",
+                              end="", flush=True)
+                    elif time.time() - last_status_t >= 15:
+                        status = f"boot:{boot_time_s:.0f}s ✓" if boot_detected else "等待開機…"
+                        log(f"Serial monitor: {status}  剩餘 {mm:02d}:{ss:02d}  [{bytes_cap} bytes]")
+                        last_status_t = time.time()
                     chunk = ser.read(ser.in_waiting or 1)
                     if chunk:
                         sf.write(chunk); sf.flush()
@@ -345,14 +424,16 @@ def monitor_serial_boot(iteration: int, secs: int, t_restore: float,
                                 if pat in buf:
                                     boot_time_s   = time.time() - t_restore
                                     boot_detected = True
-                                    log(f"\nSerial: 開機完成 ({pat.decode(errors='replace').strip()!r})"
+                                    log(f"Serial: 開機完成 ({pat.decode(errors='replace').strip()!r})"
                                         f"  boot time={boot_time_s:.1f}s")
                                     break
     except Exception as e:
-        print()
+        if is_tty:
+            print()
         log(f"Serial monitor: 無法開啟 port — {e}", "WARN")
 
-    print()
+    if is_tty:
+        print()
     if not boot_detected:
         log(f"Serial monitor: ⚠ {secs}s 內未偵測到開機完成", "WARN")
         if serial_log.exists():
@@ -387,6 +468,8 @@ def main() -> None:
                         help="Seconds to wait after enabling SSH")
     parser.add_argument("--reboot-wait", type=int, default=WAIT_REBOOT_SECS,
                         help="Seconds to wait for reboot")
+    parser.add_argument("--no-reset", action="store_true",
+                        help="Skip restore_to_default and reboot steps")
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "config.yaml")
     args = parser.parse_args()
 
@@ -434,44 +517,63 @@ def main() -> None:
             "boot_detected":False,
             "boot_time_s":  0.0,
         }
-        ok = True
+        step_ok = [True, True, True, True]   # [browser, ssh, serial, boot]
 
-        # Step 1 — browser: enable SSH
-        if not browser_enable_ssh():
-            ok = False
+        # ── Serial recorder: start at beginning of iteration ──────────────
+        recorder = SerialRecorder(run_dir, iteration)
+        recorder.start()
+
+        # ── Step 1: Browser — enable SSH ──────────────────────────────────
+        if not browser_enable_ssh(run_dir, iteration):
+            step_ok[0] = False
             log("Step 1 FAIL: 無法啟用 SSH Service", "WARN")
         else:
             iter_info["browser_ok"] = True
             log(f"等待 {args.ssh_wait}s 讓 SSH 服務就緒…")
             time.sleep(args.ssh_wait)
 
-        # Step 2 — SSH stress (even if browser failed, attempt SSH)
-        ssh_results = ssh_stress(args.ssh_cycles)
-        iter_info["ssh_cycles"]  = ssh_results
-        iter_info["ssh_success"] = sum(1 for r in ssh_results if r["success"])
-        iter_info["ssh_fail"]    = sum(1 for r in ssh_results if not r["success"])
-        if iter_info["ssh_fail"] > 0:
-            ok = False
-            log(f"Step 2 FAIL: SSH 壓力測試有 {iter_info['ssh_fail']} 次失敗", "WARN")
-
-        # Step 3 — serial restore
-        restore_ok, t_restore = serial_restore()
-        if not restore_ok:
-            ok = False
-            log("Step 3 FAIL: serial restore 失敗", "WARN")
+        # ── Step 2: SSH stress — only if Step 1 passed ────────────────────
+        if step_ok[0]:
+            ssh_results = ssh_stress(args.ssh_cycles)
+            iter_info["ssh_cycles"]  = ssh_results
+            iter_info["ssh_success"] = sum(1 for r in ssh_results if r["success"])
+            iter_info["ssh_fail"]    = sum(1 for r in ssh_results if not r["success"])
+            if not ssh_results or iter_info["ssh_fail"] > 0:
+                step_ok[1] = False
+                log(f"Step 2 FAIL: SSH 壓力測試有 {iter_info['ssh_fail']} 次失敗"
+                    f"（共 {len(ssh_results)} 次）", "WARN")
         else:
-            iter_info["serial_ok"] = True
+            step_ok[1] = False
+            log("Step 2 SKIP: browser 未成功，跳過 SSH stress", "WARN")
 
-        # Step 4 — monitor reboot
-        log(f"等待重開機，最多 {args.reboot_wait // 60} 分鐘…")
-        boot_detected, boot_time_s = monitor_serial_boot(
-            iteration, args.reboot_wait, t_restore, run_dir)
-        iter_info["boot_detected"] = boot_detected
-        iter_info["boot_time_s"]   = boot_time_s
+        # ── Stop serial recorder before restore/monitor claim the port ─────
+        recorder.stop()
 
-        if not boot_detected:
-            ok = False
-            log("Step 4 FAIL: 未偵測到裝置開機完成", "WARN")
+        # ── Step 3 & 4: Serial restore + reboot (skipped if --no-reset) ────
+        if args.no_reset:
+            log("Step 3 SKIP: --no-reset，略過 restore_to_default")
+            log("Step 4 SKIP: --no-reset，略過重開機偵測")
+            iter_info["serial_ok"]    = None   # N/A
+            iter_info["boot_detected"] = None  # N/A
+        else:
+            restore_ok, t_restore = serial_restore()
+            if not restore_ok:
+                step_ok[2] = False
+                log("Step 3 FAIL: serial restore 失敗", "WARN")
+            else:
+                iter_info["serial_ok"] = True
+
+            log(f"等待重開機，最多 {args.reboot_wait // 60} 分鐘…")
+            boot_detected, boot_time_s = monitor_serial_boot(
+                iteration, args.reboot_wait, t_restore if restore_ok else time.time(),
+                run_dir)
+            iter_info["boot_detected"] = boot_detected
+            iter_info["boot_time_s"]   = boot_time_s
+            if not boot_detected:
+                step_ok[3] = False
+                log("Step 4 FAIL: 未偵測到裝置開機完成", "WARN")
+
+        ok = all(step_ok)
 
         if ok:
             success_count += 1

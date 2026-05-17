@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { h, ref, computed, onMounted } from 'vue'
+import { h, ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { NTag, useMessage } from 'naive-ui'
 import { api, type Run, type RunDetail } from '@/api'
 import { useAppStore } from '@/stores/app'
@@ -7,20 +7,45 @@ import { useAppStore } from '@/stores/app'
 const store   = useAppStore()
 const message = useMessage()
 
-const runs       = ref<Run[]>([])
+// Use store.runs directly so the ↻ refresh button and auto-poll both work
+const runs = computed(() => store.runs.filter((r: Run) => r.type === 'ssh-stress'))
+
 const detail     = ref<RunDetail | null>(null)
 const showModal  = ref(false)
 const loading    = ref(false)
 const iterations = ref(5)
 const sshCycles  = ref(10)
+const doReset    = ref(true)
 
 const isRunning = computed(() =>
   store.status.running && store.status.mode === 'ssh-stress'
 )
 
-onMounted(async () => {
-  runs.value = (await api.runs()).filter((r: Run) => r.type === 'ssh-stress')
-})
+// ── Live log ──────────────────────────────────────────────────────────────────
+const liveLogContent = ref('')
+const liveLogEl      = ref<HTMLElement | null>(null)
+let liveTimer: ReturnType<typeof setInterval> | null = null
+
+async function fetchLiveLog() {
+  const res = await api.liveLog()
+  liveLogContent.value = res.content
+  await nextTick()
+  if (liveLogEl.value) liveLogEl.value.scrollTop = liveLogEl.value.scrollHeight
+}
+
+watch(isRunning, (running) => {
+  if (running) {
+    fetchLiveLog()
+    liveTimer = setInterval(fetchLiveLog, 2000)
+  } else {
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null }
+    // Final fetch after test finishes
+    fetchLiveLog()
+  }
+}, { immediate: true })
+
+onMounted(() => store.refresh())
+onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
 
 function fmtDate(ts?: string) {
   if (!ts) return '—'
@@ -101,13 +126,13 @@ async function runTest() {
     mode:       'ssh-stress',
     iterations: iterations.value,
     ssh_cycles: sshCycles.value,
+    do_reset:   doReset.value,
   })
   if (res?.status === 'already_running') {
     message.warning(`Already running (PID ${res.pid})`)
   } else {
     const n = iterations.value
     message.info(`SSH Stress started — ${n === 0 ? '∞' : n} cycles × ${sshCycles.value} SSH attempts`)
-    runs.value = (await api.runs()).filter((r: Run) => r.type === 'ssh-stress')
   }
 }
 </script>
@@ -124,6 +149,16 @@ async function runTest() {
         <n-input-number v-model:value="sshCycles"  :min="1" :max="100"  style="width:150px;">
           <template #prefix>SSH/cycle</template>
         </n-input-number>
+
+        <n-divider vertical />
+
+        <n-space align="center" :size="6">
+          <n-switch v-model:value="doReset" />
+          <n-text :depth="doReset ? 1 : 3" style="font-size:13px;">
+            Reset Default
+          </n-text>
+        </n-space>
+
         <n-text depth="3" style="font-size:12px;">（Cycles=0 為無限循環）</n-text>
 
         <n-button type="primary" :disabled="store.status.running" @click="runTest">
@@ -143,11 +178,26 @@ async function runTest() {
     <n-alert type="info" :bordered="false" style="font-size:13px;">
       每個 cycle：
       <strong>①</strong> Browser 登入 DUT Web GUI → 開啟 SSH Service →
-      <strong>②</strong> 等 10 秒 →
-      <strong>③</strong> paramiko 做 N 次 SSH 連線/斷線 →
-      <strong>④</strong> Serial 執行 restore_to_default → 等待重開機。
+      <strong>②</strong> 等待 SSH 就緒 →
+      <strong>③</strong> 做 N 次 SSH 連線/斷線 →
+      <strong v-if="doReset">④</strong><span v-if="doReset"> Serial 執行 restore_to_default → 等待重開機。</span>
+      <span v-else>（Reset Default 已關閉，不執行恢復出廠）</span>
       設定 (DUT IP / Serial / Web 帳密) 請至 <strong>Settings</strong> 頁修改。
     </n-alert>
+
+    <!-- ── Live Log ── -->
+    <n-card v-if="liveLogContent" size="small">
+      <template #header>
+        <n-space align="center" :size="8">
+          <span>Live Log</span>
+          <n-badge v-if="isRunning" dot processing type="warning" />
+          <n-text v-else depth="3" style="font-size:12px;">（已結束）</n-text>
+        </n-space>
+      </template>
+      <div ref="liveLogEl" style="max-height:320px;overflow-y:auto;background:var(--n-color);border-radius:4px;padding:8px;">
+        <pre style="font-size:11px;line-height:1.5;white-space:pre-wrap;margin:0;font-family:monospace;">{{ liveLogContent }}</pre>
+      </div>
+    </n-card>
 
     <!-- ── History ── -->
     <n-card title="SSH Stress History" size="small">

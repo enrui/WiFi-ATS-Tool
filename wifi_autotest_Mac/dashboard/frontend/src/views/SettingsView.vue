@@ -23,6 +23,9 @@ const webHost    = ref('')
 const webUser    = ref('')
 const webPass    = ref('')
 const webVisible = ref(false)
+const sshUser    = ref('')
+const sshPass    = ref('')
+const sshVisible = ref(false)
 const netSaving  = ref(false)
 
 onMounted(async () => {
@@ -36,6 +39,8 @@ onMounted(async () => {
   webHost.value    = s.web_host
   webUser.value    = s.web_user
   webPass.value    = s.web_password
+  sshUser.value    = s.ssh_user
+  sshPass.value    = s.ssh_password
 })
 
 async function saveApiKey() {
@@ -65,6 +70,8 @@ async function saveNetwork() {
       web_host:     webHost.value,
       web_user:     webUser.value,
       web_password: webPass.value,
+      ssh_user:     sshUser.value,
+      ssh_password: sshPass.value,
     }
     await api.saveSettings(req)
     message.success('Settings saved to config.yaml')
@@ -140,7 +147,7 @@ async function saveNetwork() {
           </n-gi>
         </n-grid>
 
-        <n-divider style="margin:4px 0;">Web GUI Login (Reset Stress Test)</n-divider>
+        <n-divider style="margin:4px 0;">Web GUI Login</n-divider>
 
         <n-grid :cols="3" :x-gap="12">
           <n-gi>
@@ -149,12 +156,12 @@ async function saveNetwork() {
             </n-form-item>
           </n-gi>
           <n-gi>
-            <n-form-item label="Username" :show-feedback="false">
+            <n-form-item label="Web Username" :show-feedback="false">
               <n-input v-model:value="webUser" placeholder="admin" />
             </n-form-item>
           </n-gi>
           <n-gi>
-            <n-form-item label="Password" :show-feedback="false">
+            <n-form-item label="Web Password" :show-feedback="false">
               <n-input-group>
                 <n-input
                   v-model:value="webPass"
@@ -162,6 +169,28 @@ async function saveNetwork() {
                   placeholder="admin"
                 />
                 <n-button ghost @click="webVisible = !webVisible">{{ webVisible ? '🙈' : '👁' }}</n-button>
+              </n-input-group>
+            </n-form-item>
+          </n-gi>
+        </n-grid>
+
+        <n-divider style="margin:4px 0;">SSH Login</n-divider>
+
+        <n-grid :cols="2" :x-gap="12">
+          <n-gi>
+            <n-form-item label="SSH Username" :show-feedback="false">
+              <n-input v-model:value="sshUser" placeholder="root" />
+            </n-form-item>
+          </n-gi>
+          <n-gi>
+            <n-form-item label="SSH Password" :show-feedback="false">
+              <n-input-group>
+                <n-input
+                  v-model:value="sshPass"
+                  :type="sshVisible ? 'text' : 'password'"
+                  placeholder="password"
+                />
+                <n-button ghost @click="sshVisible = !sshVisible">{{ sshVisible ? '🙈' : '👁' }}</n-button>
               </n-input-group>
             </n-form-item>
           </n-gi>

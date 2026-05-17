@@ -93,6 +93,8 @@ export interface Settings {
   web_host: string
   web_user: string
   web_password: string
+  ssh_user: string
+  ssh_password: string
 }
 
 export interface SaveSettingsReq {
@@ -104,19 +106,28 @@ export interface SaveSettingsReq {
   web_host?:     string
   web_user?:     string
   web_password?: string
+  ssh_user?:     string
+  ssh_password?: string
 }
 
 export interface TriggerReq {
   mode:        string
   iterations?: number
   ssh_cycles?: number
+  do_reset?:   boolean
 }
 
 const get  = (url: string) => fetch(url).then(r => r.json())
 const post = (url: string, body: unknown) =>
   fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json())
 
+export interface LiveLog {
+  content: string
+  running: boolean
+}
+
 export const api = {
+  liveLog:       (): Promise<LiveLog>              => get('/api/log/live'),
   runs:          (): Promise<Run[]>               => get('/api/runs'),
   runDetail:     (id: string): Promise<RunDetail>  => get(`/api/runs/${id}`),
   status:        (): Promise<RunStatus>            => get('/api/status'),

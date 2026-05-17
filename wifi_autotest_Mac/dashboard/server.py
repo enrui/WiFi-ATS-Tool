@@ -166,14 +166,50 @@ def _write_state(state: dict) -> None:
 def _is_running(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    # os.kill(pid, 0) succeeds even for zombie processes — check stat explicitly
+    try:
+        r = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                           capture_output=True, text=True, timeout=2)
+        stat = r.stdout.strip()
+        if not stat or "Z" in stat:
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+            return False
+    except Exception:
+        pass
+    return True
 
 
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
+@app.get("/api/log/live")
+def live_log(tail_kb: int = 32):
+    """Return the tail of the currently-running test's bg log file."""
+    state = _read_state()
+    log_file = state.get("log_file")
+    if not log_file:
+        return {"content": "", "running": False}
+    p = Path(log_file)
+    if not p.exists():
+        return {"content": "", "running": False}
+    try:
+        tail_bytes = tail_kb * 1024
+        size = p.stat().st_size
+        with open(p, "r", errors="replace") as f:
+            if size > tail_bytes:
+                f.seek(size - tail_bytes)
+            content = f.read()
+        pid = state.get("pid", 0)
+        return {"content": content, "running": bool(pid and _is_running(pid))}
+    except Exception as e:
+        return {"content": str(e), "running": False}
+
+
 @app.get("/api/runs")
 def list_runs():
     if not RUNS_DIR.exists():
@@ -230,6 +266,7 @@ class TriggerReq(BaseModel):
     mode: str = "rf"          # "rf" | "stability" | "rf stability" | "reset" | "ssh-stress"
     iterations: int = 0       # 0 = infinite (reset / ssh-stress)
     ssh_cycles: int = 10      # SSH connect/disconnect count per cycle (ssh-stress)
+    do_reset: bool = True     # whether to run restore_to_default after SSH stress
 
 
 @app.post("/api/trigger")
@@ -276,6 +313,8 @@ def trigger(req: TriggerReq):
                "--ssh-cycles", str(req.ssh_cycles)]
         if req.iterations > 0:
             cmd += ["--iterations", str(req.iterations)]
+        if not req.do_reset:
+            cmd += ["--no-reset"]
 
         stamp    = datetime.now().strftime("%Y%m%d-%H%M%S")
         log_path = str(PROJECT_ROOT / "runs" / f"ssh_stress_bg_{stamp}.log")
@@ -477,6 +516,8 @@ def get_settings():
         "web_host":        dut.get("web_host",     "192.168.1.1"),
         "web_user":        dut.get("web_user",     "admin"),
         "web_password":    dut.get("web_password", "admin"),
+        "ssh_user":        dut.get("ssh_user",     "root"),
+        "ssh_password":    dut.get("ssh_password", ""),
     }
 
 
@@ -489,6 +530,8 @@ class SettingsReq(BaseModel):
     web_host:     Optional[str] = None
     web_user:     Optional[str] = None
     web_password: Optional[str] = None
+    ssh_user:     Optional[str] = None
+    ssh_password: Optional[str] = None
 
 
 @app.post("/api/settings")
@@ -514,6 +557,8 @@ def save_settings(req: SettingsReq):
         "web_host":    ("dut",     "web_host"),
         "web_user":    ("dut",     "web_user"),
         "web_password":("dut",     "web_password"),
+        "ssh_user":    ("dut",     "ssh_user"),
+        "ssh_password":("dut",     "ssh_password"),
         "bpi_ip":      ("bpi_sta", "host"),
     }
     updates = {k: getattr(req, k) for k in yaml_fields if getattr(req, k) is not None}
