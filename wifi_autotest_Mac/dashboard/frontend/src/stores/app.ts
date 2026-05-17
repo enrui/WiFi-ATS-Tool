@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { api, type Run, type RunStatus } from '@/api'
+import { api, type Run, type RunStatus, type TriggerReq } from '@/api'
 
 export const useAppStore = defineStore('app', () => {
   // ── theme ──────────────────────────────────────────────────
@@ -54,10 +54,10 @@ export const useAppStore = defineStore('app', () => {
     if (prev && !status.value.running) await refresh()
   }
 
-  async function trigger(mode: string, iterations = 0) {
-    const res = await api.trigger(mode, iterations)
+  async function trigger(req: TriggerReq) {
+    const res = await api.trigger(req)
     if (res.status === 'already_running') return res
-    status.value = { running: true, pid: res.pid, log_file: res.log_file, mode }
+    status.value = { running: true, pid: res.pid, log_file: res.log_file, mode: req.mode }
     return res
   }
 

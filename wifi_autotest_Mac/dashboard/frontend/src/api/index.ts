@@ -21,6 +21,12 @@ export interface Run {
     failure: number
     result: string
   }
+  ssh_stress?: {
+    total: number
+    success: number
+    failure: number
+    result: string
+  }
 }
 
 export interface RunDetail extends Run {
@@ -39,6 +45,23 @@ export interface RunDetail extends Run {
       boot_detected: boolean
       boot_time_s: number
       serial_log?: string
+    }[]
+  }
+  ssh_stress_detail?: {
+    total: number
+    success: number
+    failure: number
+    result: string
+    iterations: {
+      iteration: number
+      result: string
+      browser_ok: boolean
+      ssh_success: number
+      ssh_fail: number
+      ssh_cycles: { cycle: number; success: boolean; time_ms: number; error: string }[]
+      serial_ok: boolean
+      boot_detected: boolean
+      boot_time_s: number
     }[]
   }
   log?: string
@@ -83,17 +106,23 @@ export interface SaveSettingsReq {
   web_password?: string
 }
 
+export interface TriggerReq {
+  mode:        string
+  iterations?: number
+  ssh_cycles?: number
+}
+
 const get  = (url: string) => fetch(url).then(r => r.json())
 const post = (url: string, body: unknown) =>
   fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json())
 
 export const api = {
-  runs:          (): Promise<Run[]>              => get('/api/runs'),
-  runDetail:     (id: string): Promise<RunDetail> => get(`/api/runs/${id}`),
-  status:        (): Promise<RunStatus>          => get('/api/status'),
-  stationStatus: (): Promise<StationStatus>      => get('/api/station/status'),
-  settings:      (): Promise<Settings>           => get('/api/settings'),
-  saveSettings:  (body: SaveSettingsReq)         => post('/api/settings', body),
-  trigger:       (mode: string, iterations = 0)  => post('/api/trigger', { mode, iterations }),
-  stop:          ()                              => fetch('/api/trigger', { method: 'DELETE' }).then(r => r.json()),
+  runs:          (): Promise<Run[]>               => get('/api/runs'),
+  runDetail:     (id: string): Promise<RunDetail>  => get(`/api/runs/${id}`),
+  status:        (): Promise<RunStatus>            => get('/api/status'),
+  stationStatus: (): Promise<StationStatus>        => get('/api/station/status'),
+  settings:      (): Promise<Settings>             => get('/api/settings'),
+  saveSettings:  (body: SaveSettingsReq)           => post('/api/settings', body),
+  trigger:       (req: TriggerReq)                 => post('/api/trigger', req),
+  stop:          ()                               => fetch('/api/trigger', { method: 'DELETE' }).then(r => r.json()),
 }

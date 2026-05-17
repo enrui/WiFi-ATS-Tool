@@ -55,7 +55,7 @@ async function openDetail(row: Run) {
 }
 
 async function runTest() {
-  const res = await store.trigger('stability')
+  const res = await store.trigger({ mode: 'stability' })
   if (res?.status === 'already_running') message.warning(`Already running (PID ${res.pid})`)
   else message.info('Stability test started')
 }

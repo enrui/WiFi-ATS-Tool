@@ -68,7 +68,7 @@ async function openDetail(row: Run) {
 }
 
 async function runTest() {
-  const res = await store.trigger('rf')
+  const res = await store.trigger({ mode: 'rf' })
   if (res?.status === 'already_running') message.warning(`Already running (PID ${res.pid})`)
   else message.info('RF test started')
 }

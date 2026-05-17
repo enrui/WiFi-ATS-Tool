@@ -90,20 +90,25 @@ def _parse_junit(run_dir: Path) -> dict:
 
 def _run_info(run_dir: Path) -> dict:
     name         = run_dir.name
-    is_stability = name.startswith("stability-")
-    is_reset     = name.startswith("reset-")
-    ts = re.sub(r"^(stability|reset)-", "", name)
+    is_stability  = name.startswith("stability-")
+    is_reset      = name.startswith("reset-")
+    is_ssh_stress = name.startswith("ssh-stress-")
+    ts = re.sub(r"^(stability|reset|ssh-stress)-", "", name)
 
-    run_type = "stability" if is_stability else ("reset" if is_reset else "rf")
+    run_type = ("stability" if is_stability
+                else "reset"      if is_reset
+                else "ssh-stress" if is_ssh_stress
+                else "rf")
     info: dict = {"id": name, "timestamp": ts, "type": run_type}
 
-    if is_reset:
+    if is_reset or is_ssh_stress:
         result_file = run_dir / "result.json"
         info.update({"total": 0, "passed": 0, "failed": 0})
         if result_file.exists():
             try:
                 r = json.loads(result_file.read_text())
-                info["reset"] = {
+                key = "reset" if is_reset else "ssh_stress"
+                info[key] = {
                     "total":   r.get("total",   0),
                     "success": r.get("success", 0),
                     "failure": r.get("failure", 0),
@@ -193,16 +198,19 @@ def get_run(run_id: str):
     if info["type"] == "rf":
         info["cases"] = _parse_junit(run_dir)["cases"]
 
-    if info["type"] == "reset":
+    if info["type"] in ("reset", "ssh-stress"):
         result_file = run_dir / "result.json"
         if result_file.exists():
             try:
-                info["reset_detail"] = json.loads(result_file.read_text())
+                detail_key = "reset_detail" if info["type"] == "reset" else "ssh_stress_detail"
+                info[detail_key] = json.loads(result_file.read_text())
             except Exception:
                 pass
-        log_file = run_dir / "reset_test.log"
-        if log_file.exists():
-            info["log"] = log_file.read_text(errors="replace")[-8000:]
+        for log_name in ("reset_test.log", "ssh_stress.log"):
+            log_file = run_dir / log_name
+            if log_file.exists():
+                info["log"] = log_file.read_text(errors="replace")[-8000:]
+                break
 
     ai = run_dir / "claude_report.md"
     if ai.exists():
@@ -219,8 +227,9 @@ def get_run(run_id: str):
 
 
 class TriggerReq(BaseModel):
-    mode: str = "rf"          # "rf" | "stability" | "rf stability" | "reset"
-    iterations: int = 0       # for reset mode: 0 = infinite
+    mode: str = "rf"          # "rf" | "stability" | "rf stability" | "reset" | "ssh-stress"
+    iterations: int = 0       # 0 = infinite (reset / ssh-stress)
+    ssh_cycles: int = 10      # SSH connect/disconnect count per cycle (ssh-stress)
 
 
 @app.post("/api/trigger")
@@ -251,6 +260,32 @@ def trigger(req: TriggerReq):
                                     stdout=lf, stderr=lf)
         pid = proc.pid
         _write_state({"pid": pid, "log_file": log_path, "mode": "reset"})
+        return {"status": "started", "pid": pid, "log_file": log_path}
+
+    # ── SSH Stress test ──────────────────────────────────────────────────────
+    if req.mode == "ssh-stress":
+        ssh_script = PROJECT_ROOT / "scripts" / "ssh_stress_test.py"
+        if not ssh_script.exists():
+            raise HTTPException(500, f"ssh_stress_test.py not found at {ssh_script}")
+
+        venv_python = PROJECT_ROOT / ".venv" / "bin" / "python3"
+        python_bin  = str(venv_python) if venv_python.exists() else sys.executable
+
+        cmd = [python_bin, str(ssh_script),
+               "--config",     str(PROJECT_ROOT / "config.yaml"),
+               "--ssh-cycles", str(req.ssh_cycles)]
+        if req.iterations > 0:
+            cmd += ["--iterations", str(req.iterations)]
+
+        stamp    = datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_path = str(PROJECT_ROOT / "runs" / f"ssh_stress_bg_{stamp}.log")
+        RUNS_DIR.mkdir(exist_ok=True)
+
+        with open(log_path, "w") as lf:
+            proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT),
+                                    stdout=lf, stderr=lf)
+        pid = proc.pid
+        _write_state({"pid": pid, "log_file": log_path, "mode": "ssh-stress"})
         return {"status": "started", "pid": pid, "log_file": log_path}
 
     # ── RF / Stability ───────────────────────────────────────────────────────

@@ -55,7 +55,7 @@ const stabilityColumns = [
 ]
 
 async function runTest(mode: string) {
-  const res = await store.trigger(mode)
+  const res = await store.trigger({ mode })
   if (res?.status === 'already_running') message.warning(`Already running (PID ${res.pid})`)
 }
 </script>

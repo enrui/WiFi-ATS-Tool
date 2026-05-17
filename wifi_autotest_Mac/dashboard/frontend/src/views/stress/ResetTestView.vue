@@ -89,7 +89,7 @@ async function openDetail(row: Run) {
 
 async function runTest() {
   const n = iterations.value
-  const res = await store.trigger('reset', n)
+  const res = await store.trigger({ mode: 'reset', iterations: n })
   if (res?.status === 'already_running') {
     message.warning(`Already running (PID ${res.pid})`)
   } else {

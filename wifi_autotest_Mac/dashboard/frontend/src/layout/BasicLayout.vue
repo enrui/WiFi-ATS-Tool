@@ -5,7 +5,7 @@ import { NIcon, type MenuOption } from 'naive-ui'
 import {
   GridOutline, PulseOutline, SettingsOutline,
   FlaskOutline, WifiOutline, TimerOutline,
-  Barbell, RefreshOutline,
+  Barbell, RefreshOutline, KeyOutline,
 } from '@vicons/ionicons5'
 import { useAppStore } from '@/stores/app'
 
@@ -34,7 +34,8 @@ const menuOptions: MenuOption[] = [
   {
     label: 'Stress Test', key: 'stress', icon: icon(Barbell),
     children: [
-      { label: 'Reset Test', key: '/stress/reset', icon: icon(RefreshOutline) },
+      { label: 'Reset Test',    key: '/stress/reset', icon: icon(RefreshOutline) },
+      { label: 'SSH Stress',    key: '/stress/ssh',   icon: icon(KeyOutline) },
     ],
   },
 ]
